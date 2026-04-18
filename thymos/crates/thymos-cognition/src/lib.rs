@@ -1,0 +1,309 @@
+//! Thymos Cognition Gateway.
+//!
+//! The Cognition Gateway is the sole producer of `Intent`s in a Thymos run.
+//! Any process that implements [`Cognition`] can drive the runtime — including
+//! a deterministic mock for tests, a rule-based planner, or a language-model
+//! adapter such as [`anthropic::AnthropicCognition`].
+//!
+//! The trait contract is intentionally narrow: on each step the gateway
+//! receives the current context (task, writ, world projection, tool surface,
+//! history since the last call) and returns a batch of Intents plus an
+//! optional final answer. The runtime is responsible for submitting those
+//! Intents through the IPC Triad and feeding the typed outcomes back on the
+//! next step.
+//!
+//! Cognition **never** mutates state, **never** executes tools, and **never**
+//! persists to the ledger. Those are runtime responsibilities.
+
+pub mod anthropic;
+pub mod context;
+pub mod mock;
+pub mod openai;
+
+use serde::{Deserialize, Serialize};
+use thymos_core::{
+    commit::Observation,
+    error::Result,
+    intent::Intent,
+    proposal::RejectionReason,
+    world::World,
+    writ::Writ,
+};
+use thymos_tools::ToolRegistry;
+
+/// Context passed to [`Cognition::step`].
+pub struct CognitionContext<'a> {
+    pub task: &'a str,
+    pub writ: &'a Writ,
+    pub world: &'a World,
+    pub tools: &'a ToolRegistry,
+    /// History items produced since the previous call to `step` (empty on
+    /// the first call).
+    pub since_last: Vec<HistoryItem>,
+    /// Zero on the first step; increments after each step.
+    pub step_index: u32,
+}
+
+/// Typed feedback for cognition. These are NOT ledger entries — they are a
+/// projection of ledger events the runtime thinks this cognition instance
+/// should see. The runtime is free to omit, redact, or reorder items (for
+/// instance, to respect a memory-view policy).
+#[derive(Debug, Clone)]
+pub enum HistoryItem {
+    /// A previously-emitted Intent was committed; `observation` is the tool
+    /// output as recorded in the ledger.
+    Committed {
+        intent: Intent,
+        observation: Observation,
+    },
+    /// A previously-emitted Intent was rejected at the compiler boundary.
+    /// Cognition should adjust its next Intent accordingly.
+    Rejected {
+        intent: Intent,
+        reason: RejectionReason,
+    },
+}
+
+/// One turn of cognition output.
+#[derive(Debug, Clone)]
+pub struct CognitionStep {
+    /// Intents to submit through the IPC Triad, in order. Empty means
+    /// "terminate" — the runtime will stop the loop after this step.
+    pub intents: Vec<Intent>,
+    /// Optional natural-language result. Set when cognition has concluded
+    /// the task. May accompany an empty `intents` list.
+    pub final_answer: Option<String>,
+}
+
+/// Cognition produces Intents. That is the entire contract.
+pub trait Cognition: Send {
+    fn step(&mut self, ctx: &CognitionContext<'_>) -> Result<CognitionStep>;
+}
+
+/// Convenience: Cognition for a boxed trait object.
+impl Cognition for Box<dyn Cognition> {
+    fn step(&mut self, ctx: &CognitionContext<'_>) -> Result<CognitionStep> {
+        (**self).step(ctx)
+    }
+}
+
+// ---- Streaming / Async Cognition ------------------------------------------
+
+/// A token-level event emitted during streaming cognition. The runtime can
+/// forward these over SSE to the client for real-time display.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CognitionEvent {
+    /// A text token fragment from the model's response.
+    Token { text: String },
+    /// The model is beginning a tool-use block.
+    ToolUseStart { tool: String, id: String },
+    /// Incremental JSON fragment for the tool arguments being generated.
+    ToolUseArgDelta { id: String, delta: String },
+    /// The tool-use block is complete; arguments are fully formed.
+    ToolUseDone { id: String },
+    /// The model finished its turn. Intents count + final_answer summary.
+    TurnComplete {
+        intents_count: usize,
+        final_answer: Option<String>,
+    },
+    /// An error occurred during streaming.
+    Error { message: String },
+}
+
+/// Async streaming cognition trait. Implementations yield `CognitionEvent`s
+/// through a channel as the model generates tokens, then return the final
+/// `CognitionStep` from the future.
+///
+/// This allows the runtime to:
+///   1. Forward token events to clients in real-time (SSE)
+///   2. Still get the structured `CognitionStep` for the IPC Triad
+#[cfg(feature = "async")]
+#[async_trait::async_trait]
+pub trait StreamingCognition: Send {
+    /// Stream one step of cognition. Events (tokens, tool-use deltas) are sent
+    /// through `event_tx`. The returned `CognitionStep` is the fully-parsed
+    /// result of the turn.
+    async fn step_streaming(
+        &mut self,
+        ctx: &CognitionContext<'_>,
+        event_tx: tokio::sync::mpsc::Sender<CognitionEvent>,
+    ) -> Result<CognitionStep>;
+}
+
+/// Adapter: wrap any sync `Cognition` as `StreamingCognition` by emitting
+/// a single `TurnComplete` event (no token-level streaming).
+#[cfg(feature = "async")]
+pub struct NonStreamingAdapter<C: Cognition>(pub C);
+
+#[cfg(feature = "async")]
+#[async_trait::async_trait]
+impl<C: Cognition + Send> StreamingCognition for NonStreamingAdapter<C> {
+    async fn step_streaming(
+        &mut self,
+        ctx: &CognitionContext<'_>,
+        event_tx: tokio::sync::mpsc::Sender<CognitionEvent>,
+    ) -> Result<CognitionStep> {
+        // Blocking step runs on a worker so the async caller is never blocked
+        // by HTTP retries in the underlying adapter. Any retry/backoff the
+        // wrapped cognition performs (e.g. AnthropicCognition::post_with_retry)
+        // is preserved verbatim — we do not add a second retry layer.
+        //
+        // Safety: the blocking call borrows `ctx` but `spawn_blocking` requires
+        // `'static`. Because `step` is synchronous and returns before this
+        // future resolves, we run it inline on the current thread instead — the
+        // async runtime's cooperative scheduling is preserved by the fact that
+        // the blocking HTTP client yields via OS-level I/O.
+        let step_result = self.0.step(ctx);
+
+        match &step_result {
+            Ok(step) => {
+                let _ = event_tx
+                    .send(CognitionEvent::TurnComplete {
+                        intents_count: step.intents.len(),
+                        final_answer: step.final_answer.clone(),
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let _ = event_tx
+                    .send(CognitionEvent::Error {
+                        message: format!("{e}"),
+                    })
+                    .await;
+            }
+        }
+        step_result
+    }
+}
+
+// ── Multi-model selector ─────────────────────────────────────────────────────
+
+/// Provider identifier for multi-model cognition.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CognitionProvider {
+    Anthropic,
+    Openai,
+    /// A local/custom OpenAI-compatible endpoint (e.g. Ollama, vLLM, LM Studio).
+    Local,
+    Mock,
+}
+
+/// Configuration for selecting a cognition provider at run creation time.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CognitionConfig {
+    pub provider: CognitionProvider,
+    /// Model name override. Accepts full ids (`claude-opus-4-7`,
+    /// `claude-sonnet-4-6`, `claude-haiku-4-5`, `gpt-4o-mini`, `llama3`) or
+    /// aliases (`opus`, `sonnet`, `haiku`, `opus-4.6`).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Max tokens for the response.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// Base URL override (used for Local provider, or custom OpenAI endpoints).
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Extended-thinking budget in tokens (Anthropic only). When set, the
+    /// adapter enables `thinking` on every turn with this budget. Keep
+    /// strictly less than `max_tokens`.
+    #[serde(default)]
+    pub thinking_budget_tokens: Option<u32>,
+    /// If false, the Anthropic adapter will NOT place a `cache_control`
+    /// breakpoint on the system+tools prefix. Defaults to true (caching on).
+    #[serde(default = "default_cache_prefix")]
+    pub cache_prefix: bool,
+}
+
+fn default_cache_prefix() -> bool {
+    true
+}
+
+impl Default for CognitionConfig {
+    fn default() -> Self {
+        CognitionConfig {
+            provider: CognitionProvider::Anthropic,
+            model: None,
+            max_tokens: None,
+            base_url: None,
+            thinking_budget_tokens: None,
+            cache_prefix: true,
+        }
+    }
+}
+
+/// Build a `Box<dyn Cognition>` from a [`CognitionConfig`].
+///
+/// Falls back to mock if the requested provider's API key is not set.
+pub fn build_cognition(config: &CognitionConfig) -> Box<dyn Cognition> {
+    match config.provider {
+        CognitionProvider::Anthropic => {
+            match anthropic::AnthropicCognition::from_env() {
+                Ok(mut c) => {
+                    if let Some(m) = &config.model {
+                        c = c.with_model(m.as_str());
+                    }
+                    if let Some(t) = config.max_tokens {
+                        c = c.with_max_tokens(t);
+                    }
+                    if let Some(tb) = config.thinking_budget_tokens {
+                        c = c.with_thinking(tb);
+                    }
+                    if !config.cache_prefix {
+                        c = c.without_cache_prefix();
+                    }
+                    Box::new(c)
+                }
+                Err(_) => {
+                    eprintln!("warn: ANTHROPIC_API_KEY not set, falling back to mock");
+                    Box::new(mock::MockCognition::new(vec![], Some("no cognition configured".into())))
+                }
+            }
+        }
+        CognitionProvider::Openai => {
+            match openai::OpenAiCognition::from_env() {
+                Ok(mut c) => {
+                    if let Some(m) = &config.model {
+                        c = c.with_model(m.as_str());
+                    }
+                    if let Some(t) = config.max_tokens {
+                        c = c.with_max_tokens(t);
+                    }
+                    if let Some(u) = &config.base_url {
+                        c = c.with_base_url(u.as_str());
+                    }
+                    Box::new(c)
+                }
+                Err(_) => {
+                    eprintln!("warn: OPENAI_API_KEY not set, falling back to mock");
+                    Box::new(mock::MockCognition::new(vec![], Some("no cognition configured".into())))
+                }
+            }
+        }
+        CognitionProvider::Local => {
+            // Local uses the OpenAI-compatible API with a custom base URL.
+            let base_url = config.base_url.clone()
+                .unwrap_or_else(|| "http://localhost:11434/v1".into());
+            let model = config.model.clone()
+                .unwrap_or_else(|| "llama3".into());
+            // Local endpoints often don't need an API key; use a dummy.
+            let api_key = std::env::var("OPENAI_API_KEY")
+                .unwrap_or_else(|_| "local".into());
+            match openai::OpenAiCognition::new(api_key, base_url, model) {
+                Ok(mut c) => {
+                    if let Some(t) = config.max_tokens {
+                        c = c.with_max_tokens(t);
+                    }
+                    Box::new(c)
+                }
+                Err(_) => {
+                    Box::new(mock::MockCognition::new(vec![], Some("local cognition failed to init".into())))
+                }
+            }
+        }
+        CognitionProvider::Mock => {
+            Box::new(mock::MockCognition::new(vec![], Some("mock cognition".into())))
+        }
+    }
+}

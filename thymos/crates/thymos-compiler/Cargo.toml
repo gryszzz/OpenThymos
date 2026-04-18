@@ -1,0 +1,12 @@
+[package]
+name = "thymos-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thymos-core   = { workspace = true }
+thymos-policy = { workspace = true }
+thymos-tools  = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }

@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+Cargo.lock.tmp
+*.sqlite
+*.sqlite-journal
+*.db
+*.db-journal
+.DS_Store

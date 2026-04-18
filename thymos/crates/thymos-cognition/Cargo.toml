@@ -1,0 +1,19 @@
+[package]
+name = "thymos-cognition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+async = ["tokio", "async-trait"]
+
+[dependencies]
+thymos-core  = { workspace = true }
+thymos-tools = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+reqwest      = { workspace = true }
+tokio        = { workspace = true, optional = true }
+async-trait  = { version = "0.1", optional = true }

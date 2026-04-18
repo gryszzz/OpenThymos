@@ -1,0 +1,13 @@
+target/
+.git/
+*.db
+.env
+.env.*
+!.env.example
+node_modules/
+**/*.log
+**/*.swp
+.DS_Store
+docs/
+*.md
+!README.md

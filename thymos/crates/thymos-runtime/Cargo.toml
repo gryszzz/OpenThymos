@@ -1,0 +1,32 @@
+[package]
+name = "thymos-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+async = ["tokio", "thymos-tools/async", "thymos-cognition/async"]
+telemetry = ["tracing"]
+
+[dependencies]
+thymos-core      = { workspace = true }
+thymos-ledger    = { workspace = true }
+thymos-policy    = { workspace = true }
+thymos-tools     = { workspace = true }
+thymos-compiler  = { workspace = true }
+thymos-cognition = { workspace = true }
+
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+tokio      = { workspace = true, optional = true }
+tracing    = { workspace = true, optional = true }
+
+[[example]]
+name = "hello_triad"
+path = "examples/hello_triad.rs"
+
+[[example]]
+name = "hello_llm_triad"
+path = "examples/hello_llm_triad.rs"

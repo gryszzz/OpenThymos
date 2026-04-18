@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/thymos-core",
+    "crates/thymos-ledger",
+    "crates/thymos-policy",
+    "crates/thymos-tools",
+    "crates/thymos-compiler",
+    "crates/thymos-cognition",
+    "crates/thymos-runtime",
+    "crates/thymos-server",
+    "crates/thymos-marketplace",
+    "crates/thymos-cli",
+    "crates/thymos-client",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.80"
+
+[workspace.dependencies]
+thymos-core      = { path = "crates/thymos-core" }
+thymos-ledger    = { path = "crates/thymos-ledger" }
+thymos-policy    = { path = "crates/thymos-policy" }
+thymos-tools     = { path = "crates/thymos-tools" }
+thymos-compiler  = { path = "crates/thymos-compiler" }
+thymos-cognition = { path = "crates/thymos-cognition" }
+thymos-runtime   = { path = "crates/thymos-runtime" }
+
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+blake3     = "1.5"
+rusqlite   = { version = "0.31", features = ["bundled", "blob"] }
+thiserror  = "1"
+anyhow     = "1"
+hex        = "0.4"
+reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+ed25519-dalek = { version = "2", features = ["std", "rand_core"] }
+rand       = "0.8"
+tokio      = { version = "1", features = ["full"] }
+axum       = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+uuid       = { version = "1", features = ["v4"] }
+async-stream = "0.3"
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry         = "0.28"
+opentelemetry_sdk     = { version = "0.28", features = ["rt-tokio"] }
+opentelemetry-otlp    = { version = "0.28", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.29"
+tokio-postgres = "0.7"
+deadpool-postgres = { version = "0.14", features = ["serde"] }
+postgres-types = { version = "0.2", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

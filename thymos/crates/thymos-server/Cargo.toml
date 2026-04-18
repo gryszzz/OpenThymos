@@ -1,0 +1,39 @@
+[package]
+name = "thymos-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thymos-core      = { workspace = true }
+thymos-ledger    = { workspace = true }
+thymos-policy    = { workspace = true }
+thymos-tools     = { workspace = true }
+thymos-compiler  = { workspace = true }
+thymos-cognition = { workspace = true, features = ["async"] }
+thymos-runtime      = { workspace = true, features = ["async", "telemetry"] }
+thymos-marketplace  = { path = "../thymos-marketplace" }
+
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+tokio      = { workspace = true }
+axum       = { workspace = true }
+tower-http = { workspace = true }
+uuid       = { workspace = true }
+async-stream = { workspace = true }
+hex        = { workspace = true }
+tracing    = { workspace = true }
+tracing-subscriber    = { workspace = true }
+opentelemetry         = { workspace = true }
+opentelemetry_sdk     = { workspace = true }
+opentelemetry-otlp    = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+rusqlite = { workspace = true }
+jsonwebtoken = "9"
+
+[dev-dependencies]
+axum-test = "20"
+jsonwebtoken = "9"
+tokio = { workspace = true, features = ["full", "test-util"] }
+

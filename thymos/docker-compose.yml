@@ -1,0 +1,75 @@
+version: "3.8"
+
+services:
+  thymos-server:
+    build: .
+    ports:
+      - "3001:3001"
+    volumes:
+      - thymos-data:/data
+    environment:
+      - THYMOS_DB_PATH=/data/thymos-runs.db
+      - RUST_LOG=info
+      # Uncomment and set for LLM cognition:
+      # - ANTHROPIC_API_KEY=sk-ant-...
+      # - OPENAI_API_KEY=sk-...
+      # Uncomment for API gateway:
+      # - THYMOS_API_KEYS=key1:tenant1:name1:60,key2:tenant2:name2:120
+      # Uncomment for JWT auth:
+      # - THYMOS_JWT_SECRET=your-secret-here
+      # Uncomment for OpenTelemetry:
+      # - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+    depends_on: []
+
+  # Optional: OpenTelemetry Collector for traces.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    ports:
+      - "4317:4317"   # gRPC OTLP
+      - "4318:4318"   # HTTP OTLP
+      - "13133:13133" # health_check
+    profiles:
+      - observability
+
+  # Optional: Jaeger for trace visualization.
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "14268:14268" # Jaeger collector
+    profiles:
+      - observability
+
+  # Optional: Ollama for local-model cognition.
+  # Enable with:  docker compose --profile local up
+  # Then point Thymos at it:
+  #   cognition: { "provider": "local",
+  #                "base_url": "http://ollama:11434/v1",
+  #                "model": "llama3" }
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    profiles:
+      - local
+
+  # Optional: Postgres for production ledger backend.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: thymos
+      POSTGRES_USER: thymos
+      POSTGRES_PASSWORD: thymos
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    profiles:
+      - postgres
+
+volumes:
+  thymos-data:
+  pgdata:
+  ollama-data:

@@ -1,0 +1,1267 @@
+//! Thymos HTTP facade.
+//!
+//! Thin axum layer over the Thymos runtime with async streaming cognition.
+//!
+//! Endpoints:
+//!   POST   /runs                        — start a new agent run
+//!   GET    /runs/:id                    — get run summary
+//!   GET    /runs/:id/events             — SSE stream of trajectory entries
+//!   GET    /runs/:id/stream             — SSE stream of cognition events (tokens)
+//!   GET    /runs/:id/world              — current world projection
+//!   POST   /runs/:id/approvals/:channel — approve/deny a pending proposal
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+pub mod audit;
+pub mod auth;
+pub mod marketplace_api;
+pub mod middleware;
+pub mod run_store;
+pub mod telemetry;
+
+use axum::{
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    response::{
+        sse::{Event, Sse},
+        IntoResponse, Json,
+    },
+    routing::{get, post},
+    Router,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU32, Ordering};
+use tokio::sync::{broadcast, oneshot, watch};
+use tower_http::cors::CorsLayer;
+
+use thymos_cognition::{build_cognition, CognitionConfig, CognitionEvent, NonStreamingAdapter};
+use thymos_runtime::agent_async::ApprovalDecision;
+use thymos_core::{
+    crypto::{generate_signing_key, public_key_of},
+    writ::{Budget, DelegationBounds, EffectCeiling, TimeWindow, ToolPattern, Writ, WritBody},
+    TrajectoryId,
+};
+use thymos_ledger::{EntryPayload, Ledger};
+use thymos_policy::{PolicyEngine, WritAuthorityPolicy};
+use thymos_runtime::{AgentRunOptions, AgentRunSummary, Runtime};
+use thymos_tools::{
+    DelegateTool, HttpTool, KvGetTool, KvSetTool, MemoryRecallTool, MemoryStoreTool, ShellTool,
+    ToolRegistry,
+};
+
+/// Server-side record of a completed or in-progress run.
+#[derive(Clone, Debug, Serialize)]
+pub struct RunRecord {
+    pub trajectory_id: String,
+    pub task: String,
+    pub status: RunStatus,
+    pub summary: Option<RunSummaryDto>,
+    /// Tenant that owns this run (empty string = no tenant).
+    #[serde(default)]
+    pub tenant_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RunSummaryDto {
+    pub steps_executed: u32,
+    pub intents_submitted: u32,
+    pub commits: u32,
+    pub rejections: u32,
+    pub final_answer: Option<String>,
+    pub terminated_by: String,
+}
+
+impl From<&AgentRunSummary> for RunSummaryDto {
+    fn from(s: &AgentRunSummary) -> Self {
+        RunSummaryDto {
+            steps_executed: s.steps_executed,
+            intents_submitted: s.intents_submitted,
+            commits: s.commits,
+            rejections: s.rejections,
+            final_answer: s.final_answer.clone(),
+            terminated_by: format!("{:?}", s.terminated_by),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EntryDto {
+    pub seq: u64,
+    pub kind: String,
+    pub id: String,
+    pub detail: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorldDto {
+    pub resources: Vec<ResourceDto>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ResourceDto {
+    pub kind: String,
+    pub id: String,
+    pub version: u64,
+    pub value: serde_json::Value,
+}
+
+/// Shared application state.
+pub struct AppState {
+    pub runtime: Arc<Runtime>,
+    pub runs: Mutex<HashMap<String, RunRecord>>,
+    /// Ledger entry events per run.
+    pub event_channels: Mutex<HashMap<String, broadcast::Sender<EntryDto>>>,
+    /// Cognition streaming events per run (tokens, tool-use deltas).
+    pub cognition_channels: Mutex<HashMap<String, broadcast::Sender<CognitionEvent>>>,
+    /// Optional API gateway for auth + rate limiting.
+    pub gateway: Option<Arc<middleware::ApiGateway>>,
+    /// Optional JWT configuration for token-based auth.
+    pub jwt_config: Option<Arc<auth::JwtConfig>>,
+    /// Pending approval channels: (run_id, channel_name) → oneshot sender.
+    pub pending_approvals: Mutex<HashMap<(String, String), oneshot::Sender<ApprovalDecision>>>,
+    /// Cancellation senders: run_id → sender. Send `()` to cancel a run.
+    pub cancellation_tokens: Mutex<HashMap<String, watch::Sender<bool>>>,
+    /// Persistent run store (SQLite).
+    pub run_store: Option<Arc<run_store::RunStore>>,
+    /// Shutdown signal: send `true` to initiate graceful shutdown.
+    pub shutdown_tx: watch::Sender<bool>,
+    /// Number of currently active agent runs.
+    pub active_runs: AtomicU32,
+    /// Tool marketplace.
+    pub marketplace: marketplace_api::MarketplaceState,
+}
+
+#[derive(Deserialize)]
+pub struct CreateRunRequest {
+    pub task: String,
+    #[serde(default = "default_max_steps")]
+    pub max_steps: u32,
+    #[serde(default)]
+    pub tool_scopes: Vec<String>,
+    /// Cognition provider config. Defaults to Anthropic if omitted.
+    #[serde(default)]
+    pub cognition: Option<CognitionConfig>,
+}
+
+fn default_max_steps() -> u32 {
+    16
+}
+
+/// Server-enforced limits.
+pub const MAX_TASK_LENGTH: usize = 10_000;
+pub const MAX_STEPS_UPPER_BOUND: u32 = 256;
+pub const MAX_CONCURRENT_RUNS_PER_TENANT: u32 = 20;
+pub const MAX_CONCURRENT_RUNS_GLOBAL: u32 = 100;
+
+#[derive(Deserialize)]
+pub struct ApprovalRequest {
+    pub approve: bool,
+    pub proposal_id: Option<String>,
+}
+
+/// Build a runtime with a file-backed ledger.
+pub fn persistent_runtime(ledger_path: &str) -> Arc<Runtime> {
+    let ledger = Ledger::open(ledger_path).expect("open file-backed ledger");
+    build_runtime(ledger)
+}
+
+/// Build the default runtime with an in-memory ledger (for testing).
+pub fn default_runtime() -> Arc<Runtime> {
+    let ledger = Ledger::open_in_memory().expect("open in-memory ledger");
+    build_runtime(ledger)
+}
+
+fn build_runtime(ledger: Ledger) -> Arc<Runtime> {
+    let mut tools = ToolRegistry::new();
+    tools.register(KvSetTool::default());
+    tools.register(KvGetTool::default());
+    tools.register(MemoryStoreTool::default());
+    tools.register(MemoryRecallTool::default());
+    tools.register(DelegateTool::default());
+    tools.register(ShellTool::default());
+    tools.register(HttpTool::default());
+
+    // To register MCP server tools at startup:
+    //   tools.register_mcp_server("my-server", &["uvx", "my-mcp-server"])
+    //       .expect("spawn MCP server");
+
+    // To load tool manifests from a directory:
+    //   tools.load_manifest_dir(std::path::Path::new("./tools"))
+    //       .expect("load tool manifests");
+
+    let policy = PolicyEngine::new().with(WritAuthorityPolicy);
+    Arc::new(Runtime::new(ledger, tools, policy))
+}
+
+/// Build the axum Router.
+pub fn app(state: Arc<AppState>) -> Router {
+    let marketplace_state = state.marketplace.clone();
+    let mut router = Router::new()
+        .route("/health", get(health))
+        .route("/runs", get(list_runs).post(create_run))
+        .route("/runs/{id}", get(get_run))
+        .route("/runs/{id}/events", get(get_events))
+        .route("/runs/{id}/stream", get(get_stream))
+        .route("/runs/{id}/world", get(get_world))
+        .route("/runs/{id}/approvals/{channel}", post(post_approval))
+        .route("/runs/{id}/resume", post(resume_run))
+        .route("/runs/{id}/cancel", post(cancel_run))
+        .route("/runs/{id}/delegations", get(get_delegations))
+        .route("/usage", get(get_usage))
+        .route("/audit/entries", get(audit::get_audit_entries))
+        .route("/audit/entries/count", get(audit::count_audit_entries));
+
+    // Wire JWT middleware if configured.
+    if let Some(jwt) = &state.jwt_config {
+        router = router.layer(axum::middleware::from_fn_with_state(
+            jwt.clone(),
+            auth::jwt_middleware,
+        ));
+    }
+
+    // Wire API gateway middleware if configured.
+    if let Some(gw) = &state.gateway {
+        router = router.layer(axum::middleware::from_fn_with_state(
+            gw.clone(),
+            middleware::api_key_middleware,
+        ));
+    }
+
+    router
+        .layer(CorsLayer::permissive())
+        .with_state(state)
+        // Marketplace routes have their own state type, so merge after with_state.
+        .merge(marketplace_api::marketplace_router(marketplace_state))
+}
+
+/// Extract tenant_id from request context.
+/// Priority: JWT claims > gateway context > x-thymos-tenant-id header.
+fn extract_tenant_id(
+    headers: &HeaderMap,
+    jwt_claims: &Option<axum::Extension<auth::JwtClaims>>,
+    gateway_ctx: &Option<axum::Extension<middleware::GatewayContext>>,
+) -> String {
+    if let Some(axum::Extension(claims)) = jwt_claims {
+        if let Some(ref tid) = claims.tenant_id {
+            if !tid.is_empty() {
+                return tid.clone();
+            }
+        }
+    }
+    if let Some(axum::Extension(ctx)) = gateway_ctx {
+        if !ctx.tenant_id.is_empty() {
+            return ctx.tenant_id.clone();
+        }
+    }
+    headers
+        .get("x-thymos-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Check if a caller has access to a run. Empty tenant = no restriction.
+fn tenant_can_access(run_tenant: &str, caller_tenant: &str) -> bool {
+    // If the run has no tenant, anyone can access it.
+    if run_tenant.is_empty() {
+        return true;
+    }
+    // If the caller has no tenant (e.g. no auth), deny access to tenanted runs.
+    if caller_tenant.is_empty() {
+        return false;
+    }
+    run_tenant == caller_tenant
+}
+
+/// GET /health — liveness probe (bypasses API key auth).
+async fn health() -> impl IntoResponse {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// GET /usage — per-key usage stats dashboard.
+async fn get_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.gateway {
+        Some(gw) => {
+            let stats = gw.usage_stats();
+            (StatusCode::OK, Json(serde_json::to_value(stats).unwrap())).into_response()
+        }
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "message": "API gateway not configured", "stats": [] })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /runs/:id/resume — resume a previously started (and possibly crashed) run.
+///
+/// Looks up the run record, verifies it's in a resumable state (running or failed),
+/// and re-spawns the agent loop from where the ledger left off.
+async fn resume_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateRunRequest>,
+) -> impl IntoResponse {
+    // Look up the run.
+    let run_record = {
+        let runs = state.runs.lock().unwrap();
+        runs.get(&id).cloned()
+    };
+
+    let record = match run_record {
+        Some(rec) => rec,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "run not found" })),
+            )
+                .into_response()
+        }
+    };
+
+    if record.status == RunStatus::Completed {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "run already completed" })),
+        )
+            .into_response();
+    }
+
+    if record.trajectory_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "run has no trajectory to resume" })),
+        )
+            .into_response();
+    }
+
+    // Parse trajectory ID.
+    let traj_bytes = match hex::decode(&record.trajectory_id) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid trajectory id" })),
+            )
+                .into_response()
+        }
+    };
+
+    let trajectory_id = TrajectoryId(thymos_core::ContentHash(traj_bytes));
+
+    // Verify trajectory exists in ledger.
+    if !state.runtime.ledger.has_trajectory(trajectory_id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "trajectory not found in ledger" })),
+        )
+            .into_response();
+    }
+
+    // Mark as running again.
+    {
+        let mut runs = state.runs.lock().unwrap();
+        if let Some(rec) = runs.get_mut(&id) {
+            rec.status = RunStatus::Running;
+            rec.summary = None;
+        }
+    }
+
+    // Create fresh channels.
+    let (entry_tx, _) = broadcast::channel(256);
+    let (cognition_tx, _) = broadcast::channel::<CognitionEvent>(256);
+    {
+        let mut channels = state.event_channels.lock().unwrap();
+        channels.insert(id.clone(), entry_tx.clone());
+    }
+    {
+        let mut channels = state.cognition_channels.lock().unwrap();
+        channels.insert(id.clone(), cognition_tx.clone());
+    }
+
+    let runtime = state.runtime.clone();
+    let state2 = state.clone();
+    let run_id = id.clone();
+    let task = req.task.clone();
+
+    tokio::spawn(async move {
+        let config = req.cognition.unwrap_or_default();
+        let cognition = build_cognition(&config);
+        let mut streaming = NonStreamingAdapter(cognition);
+
+        // Resume: the runtime will pick up the existing trajectory.
+        let run = match runtime.resume_run(trajectory_id) {
+            Ok(r) => r,
+            Err(e) => {
+                let mut runs = state2.runs.lock().unwrap();
+                if let Some(rec) = runs.get_mut(&run_id) {
+                    rec.status = RunStatus::Failed;
+                    rec.summary = Some(RunSummaryDto {
+                        steps_executed: 0,
+                        intents_submitted: 0,
+                        commits: 0,
+                        rejections: 0,
+                        final_answer: Some(format!("resume failed: {e}")),
+                        terminated_by: "Error".into(),
+                    });
+                }
+                return;
+            }
+        };
+
+        // Get existing world state (checkpoint).
+        let _world = run.project_world().ok();
+        let summary = run.summary().ok();
+        let existing_commits = summary.as_ref().map(|s| s.commits).unwrap_or(0);
+
+        // Re-run the agent from the checkpoint. The cognition will start
+        // fresh but the world state carries forward from the ledger.
+        // We need to use run_agent_streaming with the existing runtime.
+        let state_for_approvals = state2.clone();
+        let run_id_for_approvals = run_id.clone();
+        let approval_requester: thymos_runtime::agent_async::ApprovalRequester =
+            Box::new(move |_traj_id, _proposal_id, channel, _reason| {
+                let (tx, rx) = oneshot::channel();
+                let mut pending = state_for_approvals.pending_approvals.lock().unwrap();
+                pending.insert(
+                    (run_id_for_approvals.clone(), channel),
+                    tx,
+                );
+                rx
+            });
+
+        let result = thymos_runtime::run_agent_streaming(
+            &runtime,
+            &mut streaming,
+            &task,
+            // Mint a fresh writ for the resumed run.
+            &{
+                let root_key = generate_signing_key();
+                let agent_key = generate_signing_key();
+                Writ::sign(
+                    WritBody {
+                        issuer: "server".into(),
+                        issuer_pubkey: public_key_of(&root_key),
+                        subject: format!("resumed-{}", run_id),
+                        subject_pubkey: public_key_of(&agent_key),
+                        parent: None,
+                        tenant_id: String::new(),
+                        tool_scopes: vec![ToolPattern::exact("*")],
+                        budget: Budget {
+                            tokens: 100_000,
+                            tool_calls: 64,
+                            wall_clock_ms: 300_000,
+                            usd_millicents: 0,
+                        },
+                        effect_ceiling: EffectCeiling::read_write_local(),
+                        time_window: TimeWindow {
+                            not_before: 0,
+                            expires_at: u64::MAX,
+                        },
+                        delegation: DelegationBounds {
+                            max_depth: 3,
+                            may_subdivide: true,
+                        },
+                    },
+                    &root_key,
+                )
+                .expect("sign writ")
+            },
+            AgentRunOptions {
+                max_steps: req.max_steps,
+            },
+            cognition_tx,
+            Some(approval_requester),
+        )
+        .await;
+
+        let mut runs = state2.runs.lock().unwrap();
+        match result {
+            Ok(summary) => {
+                let traj_id = summary.trajectory_id.to_string();
+                let dto = RunSummaryDto::from(&summary);
+                // Add existing commits to the count.
+                let mut full_dto = dto.clone();
+                full_dto.commits += existing_commits as u32;
+                if let Some(rec) = runs.get_mut(&run_id) {
+                    rec.trajectory_id = traj_id;
+                    rec.status = RunStatus::Completed;
+                    rec.summary = Some(full_dto);
+                }
+            }
+            Err(e) => {
+                if let Some(rec) = runs.get_mut(&run_id) {
+                    rec.status = RunStatus::Failed;
+                    rec.summary = Some(RunSummaryDto {
+                        steps_executed: 0,
+                        intents_submitted: 0,
+                        commits: 0,
+                        rejections: 0,
+                        final_answer: Some(format!("error: {e}")),
+                        terminated_by: "Error".into(),
+                    });
+                }
+            }
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "run_id": id,
+            "status": "resuming",
+        })),
+    )
+        .into_response()
+}
+
+/// POST /runs ��� start a new agent run with async streaming cognition.
+async fn create_run(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    jwt_claims: Option<axum::Extension<auth::JwtClaims>>,
+    gateway_ctx: Option<axum::Extension<middleware::GatewayContext>>,
+    Json(req): Json<CreateRunRequest>,
+) -> impl IntoResponse {
+    // Reject new runs during shutdown.
+    if *state.shutdown_tx.borrow() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "server is shutting down" })),
+        )
+            .into_response();
+    }
+
+    // Input validation.
+    if req.task.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "task is required" }))).into_response();
+    }
+    if req.task.len() > MAX_TASK_LENGTH {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("task exceeds max length of {MAX_TASK_LENGTH} characters") }))).into_response();
+    }
+    if req.max_steps > MAX_STEPS_UPPER_BOUND {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("max_steps cannot exceed {MAX_STEPS_UPPER_BOUND}") }))).into_response();
+    }
+
+    // Global concurrency check.
+    let active = state.active_runs.load(Ordering::Relaxed);
+    if active >= MAX_CONCURRENT_RUNS_GLOBAL {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": "server at capacity" }))).into_response();
+    }
+
+    let tenant_id = extract_tenant_id(&headers, &jwt_claims, &gateway_ctx);
+
+    // Per-tenant concurrency check.
+    if !tenant_id.is_empty() {
+        let runs = state.runs.lock().unwrap();
+        let tenant_running = runs.values()
+            .filter(|r| r.tenant_id == tenant_id && r.status == RunStatus::Running)
+            .count() as u32;
+        if tenant_running >= MAX_CONCURRENT_RUNS_PER_TENANT {
+            return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({
+                "error": format!("tenant has reached max concurrent runs ({MAX_CONCURRENT_RUNS_PER_TENANT})")
+            }))).into_response();
+        }
+    }
+
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let task = req.task.clone();
+
+    let user_id = if let Some(axum::Extension(claims)) = &jwt_claims {
+        claims.sub.clone()
+    } else {
+        headers
+            .get("x-thymos-user-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    let subject = if user_id.is_empty() {
+        format!("run-{}", run_id)
+    } else {
+        format!("user-{}-run-{}", user_id, run_id)
+    };
+
+    // Mint a server-side writ.
+    let root_key = generate_signing_key();
+    let agent_key = generate_signing_key();
+    let scopes: Vec<ToolPattern> = if req.tool_scopes.is_empty() {
+        vec![ToolPattern::exact("*")]
+    } else {
+        req.tool_scopes
+            .iter()
+            .map(|s| ToolPattern::exact(s.as_str()))
+            .collect()
+    };
+
+    let writ = match Writ::sign(
+        WritBody {
+            issuer: "server".into(),
+            issuer_pubkey: public_key_of(&root_key),
+            subject,
+            subject_pubkey: public_key_of(&agent_key),
+            parent: None,
+            tenant_id: tenant_id.clone(),
+            tool_scopes: scopes,
+            budget: Budget {
+                tokens: 100_000,
+                tool_calls: 64,
+                wall_clock_ms: 300_000,
+                usd_millicents: 0,
+            },
+            effect_ceiling: EffectCeiling::read_write_local(),
+            time_window: TimeWindow {
+                not_before: 0,
+                expires_at: u64::MAX,
+            },
+            delegation: DelegationBounds {
+                max_depth: 3,
+                may_subdivide: true,
+            },
+        },
+        &root_key,
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    // Create event channels.
+    let (entry_tx, _) = broadcast::channel(256);
+    let (cognition_tx, _) = broadcast::channel::<CognitionEvent>(256);
+    {
+        let mut channels = state.event_channels.lock().unwrap();
+        channels.insert(run_id.clone(), entry_tx.clone());
+    }
+    {
+        let mut channels = state.cognition_channels.lock().unwrap();
+        channels.insert(run_id.clone(), cognition_tx.clone());
+    }
+
+    // Record the run as running.
+    {
+        let mut runs = state.runs.lock().unwrap();
+        runs.insert(
+            run_id.clone(),
+            RunRecord {
+                trajectory_id: String::new(),
+                task: task.clone(),
+                status: RunStatus::Running,
+                summary: None,
+                tenant_id: tenant_id.clone(),
+            },
+        );
+    }
+    // Persist to SQLite.
+    if let Some(store) = &state.run_store {
+        let _ = store.insert(&run_id, &task, &tenant_id);
+    }
+
+    // Spawn the agent as an async task with streaming cognition.
+    // Create cancellation token for this run.
+    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+    {
+        let mut tokens = state.cancellation_tokens.lock().unwrap();
+        tokens.insert(run_id.clone(), cancel_tx);
+    }
+
+    state.active_runs.fetch_add(1, Ordering::Relaxed);
+    let runtime = state.runtime.clone();
+    let state2 = state.clone();
+    let run_id2 = run_id.clone();
+    let task2 = task.clone();
+
+    tokio::spawn(async move {
+        // Build cognition from per-run config (or default to Anthropic).
+        let config = req.cognition.unwrap_or_default();
+        let cognition = build_cognition(&config);
+        let mut streaming = NonStreamingAdapter(cognition);
+
+        // Build approval requester that parks a oneshot in AppState.
+        let state_for_approvals = state2.clone();
+        let run_id_for_approvals = run_id2.clone();
+        let approval_requester: thymos_runtime::agent_async::ApprovalRequester =
+            Box::new(move |_traj_id, _proposal_id, channel, _reason| {
+                let (tx, rx) = oneshot::channel();
+                let mut pending = state_for_approvals.pending_approvals.lock().unwrap();
+                pending.insert(
+                    (run_id_for_approvals.clone(), channel),
+                    tx,
+                );
+                rx
+            });
+
+        let agent_fut = thymos_runtime::run_agent_streaming(
+            &runtime,
+            &mut streaming,
+            &task2,
+            &writ,
+            AgentRunOptions {
+                max_steps: req.max_steps,
+            },
+            cognition_tx,
+            Some(approval_requester),
+        );
+
+        // Race the agent against a cancellation signal.
+        let result = tokio::select! {
+            biased;
+            res = agent_fut => res,
+            Ok(_) = cancel_rx.changed() => {
+                Err(thymos_core::Error::Other("run cancelled by user".into()))
+            }
+        };
+
+        // Clean up cancellation token.
+        {
+            let mut tokens = state2.cancellation_tokens.lock().unwrap();
+            tokens.remove(&run_id2);
+        }
+
+        // Post-run: emit ledger entries and update the run record.
+        let mut runs = state2.runs.lock().unwrap();
+        match result {
+            Ok(summary) => {
+                let traj_id = summary.trajectory_id.to_string();
+
+                if let Ok(entries) = runtime.ledger.entries(summary.trajectory_id) {
+                    for e in &entries {
+                        let dto = entry_to_dto(e);
+                        let _ = entry_tx.send(dto);
+                    }
+                }
+
+                let dto = RunSummaryDto::from(&summary);
+                if let Some(rec) = runs.get_mut(&run_id2) {
+                    rec.trajectory_id = traj_id.clone();
+                    rec.status = RunStatus::Completed;
+                    rec.summary = Some(dto.clone());
+                }
+                // Persist to SQLite.
+                if let Some(store) = &state2.run_store {
+                    let _ = store.update(&run_id2, &traj_id, "completed", Some(&dto));
+                }
+            }
+            Err(e) => {
+                let err_dto = RunSummaryDto {
+                    steps_executed: 0,
+                    intents_submitted: 0,
+                    commits: 0,
+                    rejections: 0,
+                    final_answer: Some(format!("error: {e}")),
+                    terminated_by: "Error".into(),
+                };
+                if let Some(rec) = runs.get_mut(&run_id2) {
+                    rec.status = RunStatus::Failed;
+                    rec.summary = Some(err_dto.clone());
+                }
+                // Persist to SQLite.
+                if let Some(store) = &state2.run_store {
+                    let _ = store.update(&run_id2, "", "failed", Some(&err_dto));
+                }
+            }
+        }
+
+        state2.active_runs.fetch_sub(1, Ordering::Relaxed);
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "run_id": run_id,
+            "task": task,
+            "status": "running",
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ListRunsQuery {
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+    pub status: Option<String>,
+}
+
+/// GET /runs — list runs with pagination and tenant scoping.
+async fn list_runs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    jwt_claims: Option<axum::Extension<auth::JwtClaims>>,
+    gateway_ctx: Option<axum::Extension<middleware::GatewayContext>>,
+    axum::extract::Query(q): axum::extract::Query<ListRunsQuery>,
+) -> impl IntoResponse {
+    let caller_tenant = extract_tenant_id(&headers, &jwt_claims, &gateway_ctx);
+    let limit = q.limit.unwrap_or(50).min(200);
+    let offset = q.offset.unwrap_or(0);
+
+    // Filter from in-memory runs.
+    let runs = state.runs.lock().unwrap();
+    let mut results: Vec<serde_json::Value> = runs
+        .iter()
+        .filter(|(_, rec)| {
+            if !caller_tenant.is_empty() && !tenant_can_access(&rec.tenant_id, &caller_tenant) {
+                return false;
+            }
+            if let Some(ref status_filter) = q.status {
+                let rec_status = match rec.status {
+                    RunStatus::Running => "running",
+                    RunStatus::Completed => "completed",
+                    RunStatus::Failed => "failed",
+                };
+                if rec_status != status_filter.as_str() {
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|(id, rec)| {
+            serde_json::json!({
+                "run_id": id,
+                "task": rec.task,
+                "status": rec.status,
+                "trajectory_id": rec.trajectory_id,
+                "tenant_id": rec.tenant_id,
+            })
+        })
+        .collect();
+
+    // Simple pagination on the collected results.
+    let total = results.len();
+    results = results.into_iter().skip(offset as usize).take(limit as usize).collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "runs": results,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        })),
+    )
+        .into_response()
+}
+
+/// GET /runs/:id — get run status and summary.
+async fn get_run(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    jwt_claims: Option<axum::Extension<auth::JwtClaims>>,
+    gateway_ctx: Option<axum::Extension<middleware::GatewayContext>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let caller_tenant = extract_tenant_id(&headers, &jwt_claims, &gateway_ctx);
+
+    // Check in-memory cache first.
+    {
+        let runs = state.runs.lock().unwrap();
+        if let Some(rec) = runs.get(&id) {
+            if !tenant_can_access(&rec.tenant_id, &caller_tenant) {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": "run not found" })),
+                )
+                    .into_response();
+            }
+            return (StatusCode::OK, Json(serde_json::to_value(rec).unwrap())).into_response();
+        }
+    }
+    // Fall back to persistent store.
+    if let Some(store) = &state.run_store {
+        if let Ok(Some(rec)) = store.get(&id) {
+            return (StatusCode::OK, Json(serde_json::to_value(rec).unwrap())).into_response();
+        }
+    }
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "run not found" })),
+    )
+        .into_response()
+}
+
+/// GET /runs/:id/events — SSE stream of trajectory entries (ledger events).
+async fn get_events(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let rx = {
+        let channels = state.event_channels.lock().unwrap();
+        channels.get(&id).map(|tx| tx.subscribe())
+    };
+
+    match rx {
+        Some(mut rx) => {
+            let stream = async_stream::stream! {
+                while let Ok(entry) = rx.recv().await {
+                    let data = serde_json::to_string(&entry).unwrap_or_default();
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(data));
+                }
+            };
+            Sse::new(stream).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "run not found" })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /runs/:id/stream — SSE stream of cognition events (tokens, tool-use deltas).
+async fn get_stream(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let rx = {
+        let channels = state.cognition_channels.lock().unwrap();
+        channels.get(&id).map(|tx| tx.subscribe())
+    };
+
+    match rx {
+        Some(mut rx) => {
+            let stream = async_stream::stream! {
+                while let Ok(evt) = rx.recv().await {
+                    let data = serde_json::to_string(&evt).unwrap_or_default();
+                    yield Ok::<_, std::convert::Infallible>(
+                        Event::default()
+                            .event(event_type(&evt))
+                            .data(data)
+                    );
+                }
+            };
+            Sse::new(stream).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "run not found" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Map a CognitionEvent to an SSE event type name for client-side filtering.
+fn event_type(evt: &CognitionEvent) -> &'static str {
+    match evt {
+        CognitionEvent::Token { .. } => "token",
+        CognitionEvent::ToolUseStart { .. } => "tool_use_start",
+        CognitionEvent::ToolUseArgDelta { .. } => "tool_use_arg_delta",
+        CognitionEvent::ToolUseDone { .. } => "tool_use_done",
+        CognitionEvent::TurnComplete { .. } => "turn_complete",
+        CognitionEvent::Error { .. } => "error",
+    }
+}
+
+/// GET /runs/:id/world — current world projection.
+async fn get_world(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let traj_id = {
+        let runs = state.runs.lock().unwrap();
+        runs.get(&id).map(|r| r.trajectory_id.clone())
+    };
+
+    let traj_id = match traj_id {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "run not found or not started" })),
+            )
+                .into_response()
+        }
+    };
+
+    let traj_bytes = match hex::decode(&traj_id) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid trajectory id" })),
+            )
+                .into_response()
+        }
+    };
+
+    let trajectory_id = TrajectoryId(thymos_core::ContentHash(traj_bytes));
+    let runtime = state.runtime.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let run = runtime.resume_run(trajectory_id)?;
+        let world = run.project_world()?;
+        let resources: Vec<ResourceDto> = world
+            .resources
+            .iter()
+            .map(|(k, v)| ResourceDto {
+                kind: k.kind.clone(),
+                id: k.id.clone(),
+                version: v.version,
+                value: v.value.clone(),
+            })
+            .collect();
+        Ok::<_, thymos_core::Error>(WorldDto { resources })
+    })
+    .await;
+
+    match result {
+        Ok(Ok(dto)) => (StatusCode::OK, Json(serde_json::to_value(dto).unwrap())).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /runs/:id/approvals/:channel — approve or deny a pending proposal.
+async fn post_approval(
+    State(state): State<Arc<AppState>>,
+    Path((id, channel)): Path<(String, String)>,
+    Json(req): Json<ApprovalRequest>,
+) -> impl IntoResponse {
+    let key = (id.clone(), channel.clone());
+    let sender = {
+        let mut pending = state.pending_approvals.lock().unwrap();
+        pending.remove(&key)
+    };
+
+    match sender {
+        Some(tx) => {
+            let decision = ApprovalDecision {
+                approve: req.approve,
+            };
+            match tx.send(decision) {
+                Ok(()) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "run_id": id,
+                        "channel": channel,
+                        "approved": req.approve,
+                    })),
+                )
+                    .into_response(),
+                Err(_) => (
+                    StatusCode::GONE,
+                    Json(serde_json::json!({ "error": "agent loop already terminated" })),
+                )
+                    .into_response(),
+            }
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "no pending approval for this run/channel",
+                "run_id": id,
+                "channel": channel,
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /runs/:id/cancel — cancel a running agent.
+async fn cancel_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Check the run exists and is running.
+    {
+        let runs = state.runs.lock().unwrap();
+        match runs.get(&id) {
+            Some(rec) if rec.status == RunStatus::Running => {}
+            Some(_) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({ "error": "run is not in running state" })),
+                )
+                    .into_response()
+            }
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": "run not found" })),
+                )
+                    .into_response()
+            }
+        }
+    }
+
+    // Send cancellation signal.
+    let token = {
+        let tokens = state.cancellation_tokens.lock().unwrap();
+        tokens.get(&id).cloned()
+    };
+
+    match token {
+        Some(tx) => {
+            let _ = tx.send(true);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "run_id": id, "status": "cancelling" })),
+            )
+                .into_response()
+        }
+        None => (
+            StatusCode::GONE,
+            Json(serde_json::json!({ "error": "run has already finished" })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /runs/:id/delegations — list child trajectories created via delegation.
+async fn get_delegations(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let traj_id = {
+        let runs = state.runs.lock().unwrap();
+        runs.get(&id).map(|r| r.trajectory_id.clone())
+    };
+
+    let traj_id = match traj_id {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "run not found or not started" })),
+            )
+                .into_response()
+        }
+    };
+
+    let traj_bytes = match hex::decode(&traj_id) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid trajectory id" })),
+            )
+                .into_response()
+        }
+    };
+
+    let trajectory_id = TrajectoryId(thymos_core::ContentHash(traj_bytes));
+
+    match state.runtime.ledger.entries(trajectory_id) {
+        Ok(entries) => {
+            let delegations: Vec<serde_json::Value> = entries
+                .iter()
+                .filter_map(|e| {
+                    if let EntryPayload::Delegation {
+                        child_trajectory_id,
+                        task,
+                        final_answer,
+                    } = &e.payload
+                    {
+                        Some(serde_json::json!({
+                            "child_trajectory_id": child_trajectory_id.to_string(),
+                            "task": task,
+                            "final_answer": final_answer,
+                            "seq": e.seq,
+                        }))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!({ "delegations": delegations }))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+fn entry_to_dto(e: &thymos_ledger::Entry) -> EntryDto {
+    let (kind, detail) = match &e.payload {
+        EntryPayload::Root { note } => (
+            "root".into(),
+            serde_json::json!({ "note": note }),
+        ),
+        EntryPayload::Commit(c) => (
+            "commit".into(),
+            serde_json::json!({
+                "proposal_id": c.body.proposal_id.to_string(),
+                "delta_ops": c.body.delta.0.len(),
+                "observations": c.body.observations.len(),
+            }),
+        ),
+        EntryPayload::Rejection { intent_id, reason } => (
+            "rejection".into(),
+            serde_json::json!({
+                "intent_id": intent_id.to_string(),
+                "reason": format!("{:?}", reason),
+            }),
+        ),
+        EntryPayload::PendingApproval { channel, reason, .. } => (
+            "pending_approval".into(),
+            serde_json::json!({ "channel": channel, "reason": reason }),
+        ),
+        EntryPayload::Delegation {
+            child_trajectory_id,
+            task,
+            final_answer,
+        } => (
+            "delegation".into(),
+            serde_json::json!({
+                "child_trajectory_id": child_trajectory_id.to_string(),
+                "task": task,
+                "final_answer": final_answer,
+            }),
+        ),
+        EntryPayload::Branch {
+            source_trajectory_id,
+            source_commit_id,
+            note,
+        } => (
+            "branch".into(),
+            serde_json::json!({
+                "source_trajectory_id": source_trajectory_id.to_string(),
+                "source_commit_id": source_commit_id.to_string(),
+                "note": note,
+            }),
+        ),
+    };
+
+    EntryDto {
+        seq: e.seq,
+        kind,
+        id: e.id.short().to_string(),
+        detail,
+    }
+}
