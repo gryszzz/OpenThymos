@@ -660,7 +660,12 @@ async fn auto_loop(
             let detail = &entry["detail"];
             let channel = detail["channel"].as_str().unwrap_or("?");
             let reason = detail["reason"].as_str().unwrap_or("(no reason)");
-            let review = render_review(channel, reason, detail.get("proposal"));
+            let review = render_review(
+                channel,
+                reason,
+                detail.get("proposal"),
+                state.workspace.as_deref(),
+            );
             let decision = resolve_approval(state, &review);
             match decision {
                 ApprovalDecision::Skip => {
@@ -719,8 +724,15 @@ fn resolve_approval(state: &ShellState, review: &str) -> ApprovalDecision {
 
 /// Render a human-readable review block for a pending proposal. Uses the
 /// proposal detail surfaced by /audit/entries (tool name + args) to show
-/// *what* the agent is about to do, not just the policy reason.
-fn render_review(channel: &str, reason: &str, proposal: Option<&Value>) -> String {
+/// *what* the agent is about to do, not just the policy reason. When a
+/// workspace is set and the proposal is an `fs_patch`, render a unified
+/// line-level diff against the on-disk file.
+fn render_review(
+    channel: &str,
+    reason: &str,
+    proposal: Option<&Value>,
+    workspace: Option<&Path>,
+) -> String {
     let mut out = String::new();
     out.push_str("\n──────── Approval Required ────────\n");
     out.push_str(&format!("channel  {channel}\n"));
@@ -738,7 +750,13 @@ fn render_review(channel: &str, reason: &str, proposal: Option<&Value>) -> Strin
                 let mode = args["mode"].as_str().unwrap_or("?");
                 out.push_str(&format!("path     {path}\n"));
                 out.push_str(&format!("mode     {mode}\n"));
-                if mode == "replace" {
+                if let Some(diff) = unified_diff_for_patch(workspace, path, mode, args) {
+                    out.push_str("diff\n");
+                    out.push_str(&diff);
+                    if !diff.ends_with('\n') {
+                        out.push('\n');
+                    }
+                } else if mode == "replace" {
                     let anchor = args["anchor"].as_str().unwrap_or("").lines().count();
                     let replace = args["replacement"].as_str().unwrap_or("").lines().count();
                     out.push_str(&format!("diff     -{anchor} +{replace} lines\n"));
@@ -808,5 +826,140 @@ fn print_final(status: &Value) {
         if let Some(commits) = summary.get("commits").and_then(|v| v.as_u64()) {
             println!("[auto] commits: {commits}");
         }
+    }
+}
+
+/// Read the file on disk and produce a unified line-diff against the
+/// proposed content. Returns None if we can't resolve the path (no
+/// workspace) or the `fs_patch` args are malformed. Long diffs are
+/// truncated to keep the review prompt readable.
+fn unified_diff_for_patch(
+    workspace: Option<&Path>,
+    path: &str,
+    mode: &str,
+    args: &Value,
+) -> Option<String> {
+    let ws = workspace?;
+    let full = {
+        let p = PathBuf::from(path);
+        if p.is_absolute() {
+            p
+        } else {
+            ws.join(p)
+        }
+    };
+    let current = fs::read_to_string(&full).unwrap_or_default();
+
+    let proposed = match mode {
+        "write" => args["content"].as_str()?.to_string(),
+        "replace" => {
+            let anchor = args["anchor"].as_str()?;
+            let replacement = args["replacement"].as_str()?;
+            if current.is_empty() {
+                // File missing — we can still show the proposed block as a pure add.
+                replacement.to_string()
+            } else {
+                // Preview the would-be file; fall back to plain splice view if
+                // the anchor is ambiguous or absent.
+                match current.match_indices(anchor).count() {
+                    1 => current.replace(anchor, replacement),
+                    _ => return Some(format_replace_fallback(anchor, replacement)),
+                }
+            }
+        }
+        _ => return None,
+    };
+
+    Some(format_unified_diff(&current, &proposed))
+}
+
+fn format_unified_diff(old: &str, new: &str) -> String {
+    use similar::{ChangeTag, TextDiff};
+
+    let diff = TextDiff::from_lines(old, new);
+    let mut out = String::new();
+    let mut printed = 0usize;
+    const MAX_LINES: usize = 80;
+
+    for change in diff.iter_all_changes() {
+        if printed >= MAX_LINES {
+            out.push_str("  … (diff truncated)\n");
+            break;
+        }
+        let marker = match change.tag() {
+            ChangeTag::Delete => '-',
+            ChangeTag::Insert => '+',
+            ChangeTag::Equal => ' ',
+        };
+        // Only show context around changes: skip Equal lines beyond a small window.
+        if matches!(change.tag(), ChangeTag::Equal) {
+            continue;
+        }
+        out.push_str(&format!("  {marker} {}", change.value()));
+        if !change.value().ends_with('\n') {
+            out.push('\n');
+        }
+        printed += 1;
+    }
+
+    if printed == 0 {
+        out.push_str("  (no textual change)\n");
+    }
+    out
+}
+
+fn format_replace_fallback(anchor: &str, replacement: &str) -> String {
+    let mut out = String::new();
+    for line in anchor.lines().take(40) {
+        out.push_str(&format!("  - {line}\n"));
+    }
+    for line in replacement.lines().take(40) {
+        out.push_str(&format!("  + {line}\n"));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unified_diff_write_mode_shows_additions_and_deletions() {
+        let tmp = std::env::temp_dir().join(format!("thymos-diff-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+
+        let args = serde_json::json!({
+            "content": "one\nTWO\nthree\nfour\n",
+        });
+        let diff = unified_diff_for_patch(Some(&tmp), "a.txt", "write", &args).unwrap();
+        assert!(diff.contains("- two"), "missing deletion: {diff}");
+        assert!(diff.contains("+ TWO"), "missing insertion: {diff}");
+        assert!(diff.contains("+ four"), "missing added line: {diff}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn unified_diff_replace_mode_uses_anchor_splice() {
+        let tmp = std::env::temp_dir().join(format!("thymos-diff2-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("b.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+        let args = serde_json::json!({
+            "anchor": "beta",
+            "replacement": "BETA",
+        });
+        let diff = unified_diff_for_patch(Some(&tmp), "b.txt", "replace", &args).unwrap();
+        assert!(diff.contains("- beta"), "missing old anchor: {diff}");
+        assert!(diff.contains("+ BETA"), "missing new text: {diff}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn unified_diff_returns_none_without_workspace() {
+        let args = serde_json::json!({ "content": "anything" });
+        assert!(unified_diff_for_patch(None, "x.txt", "write", &args).is_none());
     }
 }

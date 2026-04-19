@@ -20,6 +20,7 @@ tokio-stream = "0.1"
 dotenvy = { workspace = true }
 rustyline = "14"
 shlex = "1"
+similar = "2"
 
 [dev-dependencies]
 axum = { workspace = true }
