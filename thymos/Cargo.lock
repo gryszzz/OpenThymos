@@ -2595,11 +2595,14 @@ dependencies = [
 name = "thymos-cli"
 version = "0.0.1"
 dependencies = [
+ "axum 0.8.9",
  "clap",
  "dotenvy",
  "reqwest",
  "serde",
  "serde_json",
+ "thymos-marketplace",
+ "thymos-server",
  "tokio",
  "tokio-stream",
 ]

@@ -205,6 +205,19 @@ fn auth_headers(api_key: Option<&str>) -> Vec<(String, String)> {
     headers
 }
 
+async fn json_body_or_error(resp: reqwest::Response) -> Result<Value, String> {
+    let status = resp.status();
+    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "HTTP {}: {}",
+            status,
+            serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
+        ));
+    }
+    Ok(body)
+}
+
 async fn cmd_run(
     client: &reqwest::Client,
     url: &str,
@@ -276,7 +289,7 @@ async fn cmd_status(
     }
 
     let resp = req.send().await.map_err(|e| e.to_string())?;
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body = json_body_or_error(resp).await?;
     println!("{}", serde_json::to_string_pretty(&body).unwrap());
     Ok(())
 }
@@ -353,7 +366,7 @@ async fn cmd_world(
     }
 
     let resp = req.send().await.map_err(|e| e.to_string())?;
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body = json_body_or_error(resp).await?;
     println!("{}", serde_json::to_string_pretty(&body).unwrap());
     Ok(())
 }
@@ -369,7 +382,7 @@ async fn cmd_usage(
     }
 
     let resp = req.send().await.map_err(|e| e.to_string())?;
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body = json_body_or_error(resp).await?;
     println!("{}", serde_json::to_string_pretty(&body).unwrap());
     Ok(())
 }
@@ -380,7 +393,7 @@ async fn cmd_health(client: &reqwest::Client, url: &str) -> Result<(), String> {
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body = json_body_or_error(resp).await?;
     println!("{}", serde_json::to_string_pretty(&body).unwrap());
     Ok(())
 }
@@ -401,7 +414,7 @@ async fn cmd_approve(
     }
 
     let resp = req.send().await.map_err(|e| e.to_string())?;
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body = json_body_or_error(resp).await?;
     println!("{}", serde_json::to_string_pretty(&body).unwrap());
     Ok(())
 }
@@ -423,7 +436,7 @@ async fn cmd_runs_ls(
         req = req.header(&k, &v);
     }
     let resp = req.send().await.map_err(|e| e.to_string())?;
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body = json_body_or_error(resp).await?;
 
     let runs = body["runs"].as_array().cloned().unwrap_or_default();
     let total = body["total"].as_u64().unwrap_or(0);
@@ -460,7 +473,7 @@ async fn cmd_runs_show(
         req = req.header(&k, &v);
     }
     let resp = req.send().await.map_err(|e| e.to_string())?;
-    let rec: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let rec = json_body_or_error(resp).await?;
     println!("=== Run {run_id} ===");
     println!("{}", serde_json::to_string_pretty(&rec).unwrap_or_default());
 
@@ -470,7 +483,7 @@ async fn cmd_runs_show(
         req = req.header(&k, &v);
     }
     let resp = req.send().await.map_err(|e| e.to_string())?;
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body = json_body_or_error(resp).await?;
     let entries = body["entries"].as_array().cloned().unwrap_or_default();
     println!("\n=== Ledger ({} entries) ===", entries.len());
     for e in &entries {
@@ -500,24 +513,12 @@ async fn cmd_runs_diff(
         for (k, v) in auth_headers(api_key) {
             req = req.header(&k, &v);
         }
-        let rec: Value = req
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
+        let rec = json_body_or_error(req.send().await.map_err(|e| e.to_string())?).await?;
         let mut req = client.get(format!("{url}/audit/entries?run_id={run_id}&limit=2000"));
         for (k, v) in auth_headers(api_key) {
             req = req.header(&k, &v);
         }
-        let entries: Value = req
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
+        let entries = json_body_or_error(req.send().await.map_err(|e| e.to_string())?).await?;
         Ok((rec, entries))
     }
 

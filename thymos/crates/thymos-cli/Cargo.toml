@@ -18,3 +18,8 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = "0.1"
 dotenvy = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+thymos-server = { path = "../thymos-server" }
+thymos-marketplace = { path = "../thymos-marketplace" }

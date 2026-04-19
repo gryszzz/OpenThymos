@@ -863,7 +863,7 @@ async fn create_run(
         let mut runs = state2.runs.lock().unwrap();
         match result {
             Ok(summary) => {
-                let traj_id = summary.trajectory_id.to_string();
+                let traj_id = summary.trajectory_id.0.to_string();
 
                 if let Ok(entries) = runtime.ledger.entries(summary.trajectory_id) {
                     for e in &entries {

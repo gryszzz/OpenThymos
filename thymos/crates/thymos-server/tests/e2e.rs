@@ -164,6 +164,30 @@ async fn world_on_nonexistent_run_returns_404() {
 }
 
 #[tokio::test]
+async fn world_on_completed_run_returns_projection() {
+    let state = test_state();
+    let server = test_server(state);
+
+    let resp = server
+        .post("/runs")
+        .json(&json!({
+            "task": "world projection test",
+            "cognition": { "provider": "mock" }
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::ACCEPTED);
+    let body: Value = resp.json();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let resp = server.get(&format!("/runs/{run_id}/world")).await;
+    resp.assert_status_ok();
+    let body: Value = resp.json();
+    assert!(body["resources"].is_array(), "unexpected world body: {body}");
+}
+
+#[tokio::test]
 async fn create_run_with_tenant_headers() {
     let server = test_server(test_state());
     let resp = server
