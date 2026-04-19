@@ -294,6 +294,8 @@ pub fn build_cognition(config: &CognitionConfig) -> Box<dyn Cognition> {
             let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "local".into());
             match openai::OpenAiCognition::new(api_key, base_url, model) {
                 Ok(mut c) => {
+                    // Local models typically lack native function calling.
+                    c = c.with_tool_protocol(openai::ToolProtocol::JsonBlock);
                     if let Some(t) = config.max_tokens {
                         c = c.with_max_tokens(t);
                     }

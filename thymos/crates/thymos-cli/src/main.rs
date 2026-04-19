@@ -75,6 +75,39 @@ enum Commands {
         #[arg(long)]
         deny: bool,
     },
+    /// Run history operations (list / show / diff).
+    Runs {
+        #[command(subcommand)]
+        action: RunsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunsAction {
+    /// List recent runs.
+    Ls {
+        /// Filter by status (running, completed, failed).
+        #[arg(long)]
+        status: Option<String>,
+        /// Page size (default: 50, max 200).
+        #[arg(long, default_value = "50")]
+        limit: u32,
+        /// Offset for pagination.
+        #[arg(long, default_value = "0")]
+        offset: u32,
+    },
+    /// Show full record + ledger entries for one run.
+    Show {
+        /// Run ID.
+        run_id: String,
+    },
+    /// Diff the ledger entries of two runs (counts + final-answer compare).
+    Diff {
+        /// Source run ID.
+        a: String,
+        /// Target run ID.
+        b: String,
+    },
 }
 
 #[tokio::main]
@@ -126,6 +159,27 @@ async fn main() {
             )
             .await
         }
+        Commands::Runs { action } => match action {
+            RunsAction::Ls {
+                status,
+                limit,
+                offset,
+            } => cmd_runs_ls(
+                &client,
+                &cli.url,
+                cli.api_key.as_deref(),
+                status.as_deref(),
+                limit,
+                offset,
+            )
+            .await,
+            RunsAction::Show { run_id } => {
+                cmd_runs_show(&client, &cli.url, cli.api_key.as_deref(), &run_id).await
+            }
+            RunsAction::Diff { a, b } => {
+                cmd_runs_diff(&client, &cli.url, cli.api_key.as_deref(), &a, &b).await
+            }
+        },
     };
 
     if let Err(e) = result {
@@ -333,6 +387,167 @@ async fn cmd_approve(
     let resp = req.send().await.map_err(|e| e.to_string())?;
     let body: Value = resp.json().await.map_err(|e| e.to_string())?;
     println!("{}", serde_json::to_string_pretty(&body).unwrap());
+    Ok(())
+}
+
+async fn cmd_runs_ls(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    status: Option<&str>,
+    limit: u32,
+    offset: u32,
+) -> Result<(), String> {
+    let mut endpoint = format!("{url}/runs?limit={limit}&offset={offset}");
+    if let Some(s) = status {
+        endpoint.push_str(&format!("&status={s}"));
+    }
+    let mut req = client.get(&endpoint);
+    for (k, v) in auth_headers(api_key) {
+        req = req.header(&k, &v);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    let runs = body["runs"].as_array().cloned().unwrap_or_default();
+    let total = body["total"].as_u64().unwrap_or(0);
+    if runs.is_empty() {
+        println!("(no runs)");
+        return Ok(());
+    }
+    println!(
+        "{:<14}  {:<10}  {}",
+        "RUN ID", "STATUS", "TASK"
+    );
+    for r in &runs {
+        let id = r["run_id"].as_str().unwrap_or("?");
+        let st = r["status"].as_str().unwrap_or("?");
+        let task = r["task"].as_str().unwrap_or("");
+        let id_short: String = id.chars().take(12).collect();
+        let task_short: String = task.chars().take(56).collect();
+        println!("{id_short:<14}  {st:<10}  {task_short}");
+    }
+    println!();
+    println!("({} of {total} shown, offset {offset})", runs.len());
+    Ok(())
+}
+
+async fn cmd_runs_show(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    run_id: &str,
+) -> Result<(), String> {
+    // Status block.
+    let mut req = client.get(format!("{url}/runs/{run_id}"));
+    for (k, v) in auth_headers(api_key) {
+        req = req.header(&k, &v);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let rec: Value = resp.json().await.map_err(|e| e.to_string())?;
+    println!("=== Run {run_id} ===");
+    println!("{}", serde_json::to_string_pretty(&rec).unwrap_or_default());
+
+    // Audit entries.
+    let mut req = client.get(format!("{url}/audit/entries?run_id={run_id}&limit=200"));
+    for (k, v) in auth_headers(api_key) {
+        req = req.header(&k, &v);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let entries = body["entries"].as_array().cloned().unwrap_or_default();
+    println!("\n=== Ledger ({} entries) ===", entries.len());
+    for e in &entries {
+        let seq = e["seq"].as_u64().unwrap_or(0);
+        let kind = e["kind"].as_str().unwrap_or("?");
+        let id = e["id"].as_str().unwrap_or("");
+        let id_short: String = id.chars().take(12).collect();
+        println!("  #{seq:<4} {kind:<18} {id_short}");
+    }
+    Ok(())
+}
+
+async fn cmd_runs_diff(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    a: &str,
+    b: &str,
+) -> Result<(), String> {
+    async fn summary(
+        client: &reqwest::Client,
+        url: &str,
+        api_key: Option<&str>,
+        run_id: &str,
+    ) -> Result<(Value, Value), String> {
+        let mut req = client.get(format!("{url}/runs/{run_id}"));
+        for (k, v) in auth_headers(api_key) {
+            req = req.header(&k, &v);
+        }
+        let rec: Value = req
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut req = client.get(format!("{url}/audit/entries?run_id={run_id}&limit=2000"));
+        for (k, v) in auth_headers(api_key) {
+            req = req.header(&k, &v);
+        }
+        let entries: Value = req
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok((rec, entries))
+    }
+
+    let (rec_a, ent_a) = summary(client, url, api_key, a).await?;
+    let (rec_b, ent_b) = summary(client, url, api_key, b).await?;
+
+    fn count_kind(entries: &Value, kind: &str) -> usize {
+        entries["entries"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter(|e| e["kind"].as_str() == Some(kind))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    let commits_a = count_kind(&ent_a, "commit");
+    let commits_b = count_kind(&ent_b, "commit");
+    let rej_a = count_kind(&ent_a, "rejection");
+    let rej_b = count_kind(&ent_b, "rejection");
+    let final_a = rec_a["summary"]["final_answer"].as_str().unwrap_or("");
+    let final_b = rec_b["summary"]["final_answer"].as_str().unwrap_or("");
+
+    println!("           {:<22} {:<22} delta", a, b);
+    println!(
+        "status     {:<22} {:<22}",
+        rec_a["status"].as_str().unwrap_or("?"),
+        rec_b["status"].as_str().unwrap_or("?")
+    );
+    println!(
+        "commits    {commits_a:<22} {commits_b:<22} {:+}",
+        commits_b as i64 - commits_a as i64
+    );
+    println!(
+        "rejections {rej_a:<22} {rej_b:<22} {:+}",
+        rej_b as i64 - rej_a as i64
+    );
+    println!();
+    if final_a == final_b {
+        println!("final_answer: identical");
+    } else {
+        println!("final_answer DIFFERS:");
+        println!("  a: {final_a}");
+        println!("  b: {final_b}");
+    }
     Ok(())
 }
 

@@ -28,10 +28,85 @@ pub mod agent_async;
 #[cfg(feature = "async")]
 pub use agent_async::run_agent_streaming;
 
+/// Registry of subject signing keys, indexed by their corresponding
+/// `subject_pubkey`. The runtime consults this when a parent writ delegates:
+/// the parent's signing key (held under `parent_writ.body.subject_pubkey`)
+/// is required to mint a properly signed child writ.
+///
+/// Delegation works without a keyring (the runtime falls back to the
+/// pre-signing behavior, recording an unsigned delegation edge), but the
+/// child cannot in turn delegate further unless its key is here.
+#[derive(Clone, Default)]
+pub struct DelegationKeyring {
+    inner: std::sync::Arc<std::sync::RwLock<
+        std::collections::HashMap<thymos_core::crypto::PublicKey, thymos_core::crypto::SigningKey>,
+    >>,
+    /// Signed child writs awaiting pickup by the agent loop, keyed by the
+    /// child trajectory id. When the loop is ready to drive a delegated
+    /// child run, it calls `take_pending_child_writ` to retrieve and consume.
+    pending_writs: std::sync::Arc<std::sync::Mutex<
+        std::collections::HashMap<thymos_core::TrajectoryId, thymos_core::writ::Writ>,
+    >>,
+}
+
+impl DelegationKeyring {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register `signing_key` for the public key it derives. Subsequent
+    /// delegations whose parent writ has this `subject_pubkey` will produce
+    /// signed child writs.
+    pub fn register(&self, signing_key: thymos_core::crypto::SigningKey) {
+        let pk = thymos_core::crypto::public_key_of(&signing_key);
+        let mut g = self.inner.write().unwrap();
+        g.insert(pk, signing_key);
+    }
+
+    /// Clone the signing key registered for `pubkey`, if any.
+    pub fn get(
+        &self,
+        pubkey: &thymos_core::crypto::PublicKey,
+    ) -> Option<thymos_core::crypto::SigningKey> {
+        self.inner
+            .read()
+            .unwrap()
+            .get(pubkey)
+            .map(|k| k.clone())
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.read().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Internal: stash a freshly-signed child writ for pickup by trajectory id.
+    pub(crate) fn stash_writ(
+        &self,
+        trajectory_id: thymos_core::TrajectoryId,
+        writ: thymos_core::writ::Writ,
+    ) {
+        self.pending_writs.lock().unwrap().insert(trajectory_id, writ);
+    }
+
+    /// Take the signed child writ for `trajectory_id`, if one was stashed by
+    /// a delegation. Removes it from the keyring.
+    pub fn take_pending_child_writ(
+        &self,
+        trajectory_id: thymos_core::TrajectoryId,
+    ) -> Option<thymos_core::writ::Writ> {
+        self.pending_writs.lock().unwrap().remove(&trajectory_id)
+    }
+}
+
 pub struct Runtime {
     pub ledger: Ledger,
     pub tools: ToolRegistry,
     pub policy: PolicyEngine,
+    pub delegation_keyring: Option<DelegationKeyring>,
 }
 
 impl Runtime {
@@ -40,7 +115,15 @@ impl Runtime {
             ledger,
             tools,
             policy,
+            delegation_keyring: None,
         }
+    }
+
+    /// Builder: attach a [`DelegationKeyring`] so child writs in delegations
+    /// are properly signed when the parent's signing key is registered.
+    pub fn with_delegation_keyring(mut self, keyring: DelegationKeyring) -> Self {
+        self.delegation_keyring = Some(keyring);
+        self
     }
 
     /// Create a new trajectory and return a Run bound to it.
@@ -347,13 +430,14 @@ impl<'a> Run<'a> {
         // Generate a child key (the child subject becomes the child's issuer
         // for further delegation).
         let child_key = thymos_core::crypto::generate_signing_key();
+        let child_pubkey = thymos_core::crypto::public_key_of(&child_key);
 
-        let _child_body = WritBody {
+        let child_body = WritBody {
             issuer: parent_writ.body.subject.clone(),
             issuer_pubkey: parent_writ.body.subject_pubkey,
             subject: format!("{}-child", parent_writ.body.subject),
-            subject_pubkey: thymos_core::crypto::public_key_of(&child_key),
-            parent: None,
+            subject_pubkey: child_pubkey,
+            parent: Some(parent_writ.id),
             tenant_id: parent_writ.body.tenant_id.clone(),
             tool_scopes: child_scopes,
             budget: child_budget,
@@ -365,14 +449,30 @@ impl<'a> Run<'a> {
             },
         };
 
-        // We need the parent subject's signing key to mint the child. Since
-        // we don't have it here (the runtime only has the writ, not the key),
-        // we record the delegation edge as pending — the child writ is noted
-        // but its execution must be driven externally.
-        //
-        // For Phase 1: create the child trajectory, record the delegation
-        // edge, and return the child trajectory id so the agent loop can
-        // drive it.
+        // Sign the child writ when we have the parent subject's signing key
+        // in the runtime's keyring (the parent registers it before delegating).
+        // If the parent key isn't registered, fall back to recording the
+        // delegation edge without producing a signed writ — agent code that
+        // needs to drive the child trajectory will have to mint its own writ.
+        let signed_child: Option<thymos_core::writ::Writ> = self
+            .runtime
+            .delegation_keyring
+            .as_ref()
+            .and_then(|kr| kr.get(&parent_writ.body.subject_pubkey))
+            .and_then(|parent_sk| {
+                // mint_child verifies the body is a strict subset of parent's
+                // and that issuer_pubkey == parent.subject_pubkey, then signs.
+                parent_writ.mint_child(child_body, &parent_sk).ok()
+            });
+
+        // If we did mint a signed child, register the child's key so the
+        // child can in turn delegate further.
+        if signed_child.is_some() {
+            if let Some(kr) = &self.runtime.delegation_keyring {
+                kr.register(child_key);
+            }
+        }
+
         let child_seed = format!("delegate-{}-{}", child_task, proposal.id);
         let child_traj = TrajectoryId::new_from_seed(child_seed.as_bytes());
         self.runtime
@@ -383,6 +483,14 @@ impl<'a> Run<'a> {
         self.runtime
             .ledger
             .append_delegation(self.trajectory_id, child_traj, &child_task, None)?;
+
+        // Stash the signed child writ on the runtime for downstream agent code
+        // to retrieve via `take_pending_child_writ` (keyed by trajectory id).
+        if let Some(writ) = signed_child {
+            if let Some(kr) = &self.runtime.delegation_keyring {
+                kr.stash_writ(child_traj, writ);
+            }
+        }
 
         Ok(Step::Delegated {
             child_trajectory_id: child_traj,
@@ -551,3 +659,66 @@ pub use thymos_core::{
     world::{ResourceKey, World as CoreWorld},
     writ::{Budget, DelegationBounds, EffectCeiling, TimeWindow, ToolPattern, Writ, WritBody},
 };
+
+#[cfg(test)]
+mod keyring_tests {
+    use super::*;
+    use thymos_core::crypto::{generate_signing_key, public_key_of};
+
+    #[test]
+    fn keyring_roundtrips_signing_key_by_pubkey() {
+        let kr = DelegationKeyring::new();
+        assert!(kr.is_empty());
+        let sk = generate_signing_key();
+        let pk = public_key_of(&sk);
+        kr.register(sk);
+        assert_eq!(kr.len(), 1);
+        let retrieved = kr.get(&pk).expect("key present");
+        assert_eq!(public_key_of(&retrieved), pk);
+    }
+
+    #[test]
+    fn keyring_returns_none_for_unknown_pubkey() {
+        let kr = DelegationKeyring::new();
+        let unknown = public_key_of(&generate_signing_key());
+        assert!(kr.get(&unknown).is_none());
+    }
+
+    #[test]
+    fn pending_writs_are_take_once() {
+        use thymos_core::TrajectoryId;
+        let kr = DelegationKeyring::new();
+        let sk = generate_signing_key();
+        let parent_pk = public_key_of(&sk);
+        // Build a minimal self-signed writ to stash.
+        let body = WritBody {
+            issuer: "tester".into(),
+            issuer_pubkey: parent_pk,
+            subject: "tester".into(),
+            subject_pubkey: parent_pk,
+            parent: None,
+            tenant_id: "t".into(),
+            tool_scopes: vec![ToolPattern::exact("noop")],
+            budget: Budget {
+                tokens: 1,
+                tool_calls: 1,
+                wall_clock_ms: 1,
+                usd_millicents: 1,
+            },
+            effect_ceiling: EffectCeiling::read_write_local(),
+            time_window: TimeWindow {
+                not_before: 0,
+                expires_at: u64::MAX,
+            },
+            delegation: DelegationBounds {
+                max_depth: 0,
+                may_subdivide: false,
+            },
+        };
+        let writ = Writ::sign(body, &sk).unwrap();
+        let traj = TrajectoryId::new_from_seed(b"x");
+        kr.stash_writ(traj, writ);
+        assert!(kr.take_pending_child_writ(traj).is_some());
+        assert!(kr.take_pending_child_writ(traj).is_none());
+    }
+}
