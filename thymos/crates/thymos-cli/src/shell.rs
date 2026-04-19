@@ -1,0 +1,608 @@
+//! Interactive Thymos shell — a programmable terminal that wraps the
+//! one-shot CLI verbs into a single persistent REPL session, plus an
+//! `auto` autonomous loop that prompts inline for approvals.
+
+use std::collections::HashSet;
+use std::io::{self, IsTerminal, Write};
+use std::time::Duration;
+
+use serde_json::Value;
+
+use crate::{
+    auth_headers, cmd_approve, cmd_cancel, cmd_health, cmd_runs_diff, cmd_runs_ls, cmd_runs_show,
+    cmd_status, cmd_stream, cmd_usage, cmd_world, json_body_or_error, start_run,
+};
+
+/// Persistent defaults carried across commands within one shell session.
+struct ShellState {
+    provider: String,
+    model: Option<String>,
+    max_steps: u32,
+    scopes: Option<String>,
+    follow: bool,
+    /// Approval policy when stdin is not a TTY: "prompt" (default when interactive),
+    /// "approve", or "deny".
+    auto_approve: ApprovePolicy,
+    last_run_id: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApprovePolicy {
+    Prompt,
+    Approve,
+    Deny,
+}
+
+impl ApprovePolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            ApprovePolicy::Prompt => "prompt",
+            ApprovePolicy::Approve => "approve",
+            ApprovePolicy::Deny => "deny",
+        }
+    }
+}
+
+impl ShellState {
+    fn new() -> Self {
+        Self {
+            provider: "anthropic".into(),
+            model: None,
+            max_steps: 16,
+            scopes: None,
+            follow: false,
+            auto_approve: ApprovePolicy::Prompt,
+            last_run_id: None,
+        }
+    }
+
+    /// Expand the literal token `$last` to the most recent run id.
+    fn expand(&self, token: &str) -> String {
+        if token == "$last" {
+            self.last_run_id
+                .clone()
+                .unwrap_or_else(|| "$last".to_string())
+        } else {
+            token.to_string()
+        }
+    }
+}
+
+pub(crate) async fn cmd_shell(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+) -> Result<(), String> {
+    let mut state = ShellState::new();
+    let interactive = io::stdin().is_terminal();
+
+    if interactive {
+        run_interactive(client, url, api_key, &mut state).await
+    } else {
+        run_piped(client, url, api_key, &mut state).await
+    }
+}
+
+async fn run_interactive(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    state: &mut ShellState,
+) -> Result<(), String> {
+    use rustyline::error::ReadlineError;
+    use rustyline::DefaultEditor;
+
+    let mut rl = DefaultEditor::new().map_err(|e| e.to_string())?;
+    let history = history_path();
+    if let Some(path) = history.as_ref() {
+        let _ = rl.load_history(path);
+    }
+
+    println!("Thymos shell — {}", url);
+    println!("type `help` for commands, `exit` to leave.");
+
+    loop {
+        match rl.readline("thymos> ") {
+            Ok(line) => {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    let _ = rl.add_history_entry(trimmed);
+                }
+                match dispatch(trimmed, client, url, api_key, state).await {
+                    Ok(Continue::Exit) => break,
+                    Ok(Continue::Keep) => {}
+                    Err(e) => eprintln!("error: {e}"),
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("(ctrl-c — type `exit` to quit)");
+            }
+            Err(ReadlineError::Eof) => break,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+
+    if let Some(path) = history.as_ref() {
+        let _ = rl.save_history(path);
+    }
+    Ok(())
+}
+
+async fn run_piped(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    state: &mut ShellState,
+) -> Result<(), String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let stdin = tokio::io::stdin();
+    let mut lines = BufReader::new(stdin).lines();
+    while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
+        match dispatch(line.trim(), client, url, api_key, state).await {
+            Ok(Continue::Exit) => break,
+            Ok(Continue::Keep) => {}
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+    Ok(())
+}
+
+enum Continue {
+    Keep,
+    Exit,
+}
+
+async fn dispatch(
+    line: &str,
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    state: &mut ShellState,
+) -> Result<Continue, String> {
+    if line.is_empty() || line.starts_with('#') {
+        return Ok(Continue::Keep);
+    }
+    let raw_tokens = shlex::split(line).ok_or("parse error: unbalanced quotes")?;
+    if raw_tokens.is_empty() {
+        return Ok(Continue::Keep);
+    }
+    let tokens: Vec<String> = raw_tokens.iter().map(|t| state.expand(t)).collect();
+    let cmd = tokens[0].as_str();
+    let args: Vec<&str> = tokens[1..].iter().map(String::as_str).collect();
+
+    match cmd {
+        "exit" | "quit" => return Ok(Continue::Exit),
+        "help" => print_help(),
+        "show" => print_state(state),
+        "set" => set_value(state, &args)?,
+        "health" => cmd_health(client, url).await?,
+        "usage" => cmd_usage(client, url, api_key).await?,
+        "status" => {
+            let id = require_arg(&args, 0, "status <run-id>")?;
+            state.last_run_id = Some(id.to_string());
+            cmd_status(client, url, api_key, id).await?;
+        }
+        "stream" => {
+            let id = require_arg(&args, 0, "stream <run-id>")?;
+            state.last_run_id = Some(id.to_string());
+            cmd_stream(url, id).await?;
+        }
+        "world" => {
+            let id = require_arg(&args, 0, "world <run-id>")?;
+            state.last_run_id = Some(id.to_string());
+            cmd_world(client, url, api_key, id).await?;
+        }
+        "cancel" => {
+            let id = require_arg(&args, 0, "cancel <run-id>")?;
+            state.last_run_id = Some(id.to_string());
+            cmd_cancel(client, url, api_key, id).await?;
+        }
+        "approve" => {
+            let id = require_arg(&args, 0, "approve <run-id> <channel> [--deny]")?;
+            let channel = require_arg(&args, 1, "approve <run-id> <channel> [--deny]")?;
+            let deny = args.iter().any(|a| *a == "--deny");
+            state.last_run_id = Some(id.to_string());
+            cmd_approve(client, url, api_key, id, channel, !deny).await?;
+        }
+        "deny" => {
+            let id = require_arg(&args, 0, "deny <run-id> <channel>")?;
+            let channel = require_arg(&args, 1, "deny <run-id> <channel>")?;
+            state.last_run_id = Some(id.to_string());
+            cmd_approve(client, url, api_key, id, channel, false).await?;
+        }
+        "run" => {
+            let parsed = parse_run_args(&args, state)?;
+            let run_id = start_run(
+                client,
+                url,
+                api_key,
+                &parsed.task,
+                parsed.max_steps,
+                &parsed.provider,
+                parsed.model.as_deref(),
+                parsed.scopes.as_deref(),
+            )
+            .await?;
+            state.last_run_id = Some(run_id.clone());
+            println!("Run started: {run_id}");
+            println!("  task: {}", parsed.task);
+            println!("  provider: {}", parsed.provider);
+            if parsed.follow {
+                println!("--- streaming ---");
+                cmd_stream(url, &run_id).await?;
+                cmd_status(client, url, api_key, &run_id).await?;
+            }
+        }
+        "auto" => {
+            let parsed = parse_run_args(&args, state)?;
+            let run_id = start_run(
+                client,
+                url,
+                api_key,
+                &parsed.task,
+                parsed.max_steps,
+                &parsed.provider,
+                parsed.model.as_deref(),
+                parsed.scopes.as_deref(),
+            )
+            .await?;
+            state.last_run_id = Some(run_id.clone());
+            auto_loop(client, url, api_key, &run_id, state).await?;
+        }
+        "runs" => {
+            let sub = require_arg(&args, 0, "runs <ls|show|diff> ...")?;
+            match sub {
+                "ls" => {
+                    let (status_flag, limit, offset) = parse_runs_ls(&args[1..])?;
+                    cmd_runs_ls(client, url, api_key, status_flag.as_deref(), limit, offset)
+                        .await?;
+                }
+                "show" => {
+                    let id = require_arg(&args, 1, "runs show <run-id>")?;
+                    state.last_run_id = Some(id.to_string());
+                    cmd_runs_show(client, url, api_key, id).await?;
+                }
+                "diff" => {
+                    let a = require_arg(&args, 1, "runs diff <a> <b>")?;
+                    let b = require_arg(&args, 2, "runs diff <a> <b>")?;
+                    cmd_runs_diff(client, url, api_key, a, b).await?;
+                }
+                other => return Err(format!("unknown runs subcommand: {other}")),
+            }
+        }
+        other => return Err(format!("unknown command: {other} (try `help`)")),
+    }
+
+    Ok(Continue::Keep)
+}
+
+fn require_arg<'a>(args: &[&'a str], idx: usize, usage: &str) -> Result<&'a str, String> {
+    args.get(idx)
+        .copied()
+        .ok_or_else(|| format!("usage: {usage}"))
+}
+
+struct ParsedRun {
+    task: String,
+    max_steps: u32,
+    provider: String,
+    model: Option<String>,
+    scopes: Option<String>,
+    follow: bool,
+}
+
+fn parse_run_args(args: &[&str], state: &ShellState) -> Result<ParsedRun, String> {
+    let mut task: Option<String> = None;
+    let mut max_steps = state.max_steps;
+    let mut provider = state.provider.clone();
+    let mut model = state.model.clone();
+    let mut scopes = state.scopes.clone();
+    let mut follow = state.follow;
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        match a {
+            "--provider" => {
+                provider = args
+                    .get(i + 1)
+                    .ok_or("--provider needs a value")?
+                    .to_string();
+                i += 2;
+            }
+            "--model" => {
+                model = Some(args.get(i + 1).ok_or("--model needs a value")?.to_string());
+                i += 2;
+            }
+            "--max-steps" => {
+                let v = args.get(i + 1).ok_or("--max-steps needs a value")?;
+                max_steps = v.parse().map_err(|_| format!("bad --max-steps: {v}"))?;
+                i += 2;
+            }
+            "--scopes" => {
+                scopes = Some(args.get(i + 1).ok_or("--scopes needs a value")?.to_string());
+                i += 2;
+            }
+            "--follow" | "-f" => {
+                follow = true;
+                i += 1;
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown flag: {other}"));
+            }
+            _ => {
+                if task.is_none() {
+                    task = Some(a.to_string());
+                } else {
+                    return Err("task already set — quote multi-word tasks".into());
+                }
+                i += 1;
+            }
+        }
+    }
+
+    Ok(ParsedRun {
+        task: task.ok_or("usage: run <task> [--provider ...] [--model ...] [--follow]")?,
+        max_steps,
+        provider,
+        model,
+        scopes,
+        follow,
+    })
+}
+
+fn parse_runs_ls(args: &[&str]) -> Result<(Option<String>, u32, u32), String> {
+    let mut status: Option<String> = None;
+    let mut limit = 50u32;
+    let mut offset = 0u32;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "--status" => {
+                status = Some(args.get(i + 1).ok_or("--status needs a value")?.to_string());
+                i += 2;
+            }
+            "--limit" => {
+                let v = args.get(i + 1).ok_or("--limit needs a value")?;
+                limit = v.parse().map_err(|_| format!("bad --limit: {v}"))?;
+                i += 2;
+            }
+            "--offset" => {
+                let v = args.get(i + 1).ok_or("--offset needs a value")?;
+                offset = v.parse().map_err(|_| format!("bad --offset: {v}"))?;
+                i += 2;
+            }
+            other => return Err(format!("unknown flag: {other}")),
+        }
+    }
+    Ok((status, limit, offset))
+}
+
+fn set_value(state: &mut ShellState, args: &[&str]) -> Result<(), String> {
+    let key = require_arg(args, 0, "set <key> <value>")?;
+    let value = require_arg(args, 1, "set <key> <value>")?;
+    match key {
+        "provider" => state.provider = value.to_string(),
+        "model" => {
+            state.model = if value == "none" {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        "max_steps" | "max-steps" => {
+            state.max_steps = value.parse().map_err(|_| format!("bad max_steps: {value}"))?;
+        }
+        "scopes" => {
+            state.scopes = if value == "none" {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        "follow" => state.follow = parse_bool(value)?,
+        "auto_approve" | "auto-approve" => {
+            state.auto_approve = match value {
+                "prompt" => ApprovePolicy::Prompt,
+                "approve" | "yes" | "on" => ApprovePolicy::Approve,
+                "deny" | "no" | "off" => ApprovePolicy::Deny,
+                _ => return Err(format!("auto_approve: expected prompt|approve|deny, got {value}")),
+            }
+        }
+        other => return Err(format!("unknown setting: {other}")),
+    }
+    println!("ok");
+    Ok(())
+}
+
+fn parse_bool(value: &str) -> Result<bool, String> {
+    match value {
+        "on" | "true" | "yes" | "1" => Ok(true),
+        "off" | "false" | "no" | "0" => Ok(false),
+        other => Err(format!("expected on/off, got {other}")),
+    }
+}
+
+fn print_state(state: &ShellState) {
+    println!("provider      {}", state.provider);
+    println!(
+        "model         {}",
+        state.model.as_deref().unwrap_or("(default)")
+    );
+    println!("max_steps     {}", state.max_steps);
+    println!(
+        "scopes        {}",
+        state.scopes.as_deref().unwrap_or("(default)")
+    );
+    println!("follow        {}", state.follow);
+    println!("auto_approve  {}", state.auto_approve.as_str());
+    println!(
+        "last_run_id   {}",
+        state.last_run_id.as_deref().unwrap_or("(none)")
+    );
+}
+
+fn print_help() {
+    println!(
+        "\
+Thymos shell commands:
+  run <task> [--provider P] [--model M] [--max-steps N] [--scopes a,b] [--follow]
+  auto <task> [flags...]        run, then poll + prompt for approvals until done
+  status <run-id>               fetch status + summary
+  stream <run-id>               tail SSE events
+  world <run-id>                dump world state
+  approve <run-id> <chan> [--deny]
+  deny <run-id> <chan>
+  cancel <run-id>
+  runs ls [--status S] [--limit N] [--offset N]
+  runs show <run-id>
+  runs diff <a> <b>
+  health                        GET /health
+  usage                         GET /usage
+  set <key> <value>             provider|model|max_steps|scopes|follow|auto_approve
+  show                          print session defaults + last run id
+  help                          this message
+  exit | quit                   leave the shell
+
+Tokens: `$last` expands to the most recent run id.
+Lines starting with `#` are comments."
+    );
+}
+
+fn history_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".thymos_history"))
+}
+
+/// Poll the run to completion, surfacing each unseen pending-approval ledger
+/// entry as an inline prompt (or applying the configured policy when no TTY).
+async fn auto_loop(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    run_id: &str,
+    state: &ShellState,
+) -> Result<(), String> {
+    println!("[auto] run {run_id} — polling; {} approvals", state.auto_approve.as_str());
+    let mut handled_seqs: HashSet<u64> = HashSet::new();
+    let mut last_printed_status: Option<String> = None;
+
+    loop {
+        let status = fetch_status(client, url, api_key, run_id).await?;
+        let st = status["status"].as_str().unwrap_or("?").to_string();
+        if last_printed_status.as_deref() != Some(st.as_str()) {
+            println!("[auto] status: {st}");
+            last_printed_status = Some(st.clone());
+        }
+        if matches!(st.as_str(), "completed" | "failed" | "cancelled") {
+            print_final(&status);
+            return Ok(());
+        }
+
+        let entries = fetch_pending_entries(client, url, api_key, run_id).await?;
+        for entry in entries {
+            let seq = entry["seq"].as_u64().unwrap_or_default();
+            if handled_seqs.contains(&seq) {
+                continue;
+            }
+            let detail = &entry["detail"];
+            let channel = detail["channel"].as_str().unwrap_or("?");
+            let reason = detail["reason"].as_str().unwrap_or("(no reason)");
+            let decision = resolve_approval(state, channel, reason);
+            match decision {
+                ApprovalDecision::Skip => {
+                    // Prompt mode but no TTY — bail out so we don't hang forever.
+                    return Err(format!(
+                        "pending approval on channel `{channel}` (reason: {reason}) and no interactive TTY — set auto_approve approve|deny or re-run in a TTY"
+                    ));
+                }
+                ApprovalDecision::Approve | ApprovalDecision::Deny => {
+                    let approve = matches!(decision, ApprovalDecision::Approve);
+                    println!(
+                        "[auto] {}: channel={channel}",
+                        if approve { "approving" } else { "denying" }
+                    );
+                    cmd_approve(client, url, api_key, run_id, channel, approve).await?;
+                    handled_seqs.insert(seq);
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+}
+
+enum ApprovalDecision {
+    Approve,
+    Deny,
+    Skip,
+}
+
+fn resolve_approval(state: &ShellState, channel: &str, reason: &str) -> ApprovalDecision {
+    match state.auto_approve {
+        ApprovePolicy::Approve => ApprovalDecision::Approve,
+        ApprovePolicy::Deny => ApprovalDecision::Deny,
+        ApprovePolicy::Prompt => {
+            if !io::stdin().is_terminal() {
+                return ApprovalDecision::Skip;
+            }
+            print!("[auto] approval needed — channel={channel} reason={reason}\n  approve? [y/N] ");
+            let _ = io::stdout().flush();
+            let mut line = String::new();
+            match io::stdin().read_line(&mut line) {
+                Ok(_) => {
+                    let t = line.trim().to_lowercase();
+                    if matches!(t.as_str(), "y" | "yes") {
+                        ApprovalDecision::Approve
+                    } else {
+                        ApprovalDecision::Deny
+                    }
+                }
+                Err(_) => ApprovalDecision::Deny,
+            }
+        }
+    }
+}
+
+async fn fetch_status(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    run_id: &str,
+) -> Result<Value, String> {
+    let mut req = client.get(format!("{url}/runs/{run_id}"));
+    for (k, v) in auth_headers(api_key) {
+        req = req.header(&k, &v);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    json_body_or_error(resp).await
+}
+
+async fn fetch_pending_entries(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    run_id: &str,
+) -> Result<Vec<Value>, String> {
+    let mut req = client.get(format!(
+        "{url}/audit/entries?run_id={run_id}&kind=pending_approval&limit=200"
+    ));
+    for (k, v) in auth_headers(api_key) {
+        req = req.header(&k, &v);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let body = json_body_or_error(resp).await?;
+    Ok(body["entries"].as_array().cloned().unwrap_or_default())
+}
+
+fn print_final(status: &Value) {
+    if let Some(summary) = status.get("summary") {
+        if let Some(answer) = summary.get("final_answer").and_then(|v| v.as_str()) {
+            println!("--- final answer ---");
+            println!("{answer}");
+        }
+        if let Some(commits) = summary.get("commits").and_then(|v| v.as_u64()) {
+            println!("[auto] commits: {commits}");
+        }
+    }
+}

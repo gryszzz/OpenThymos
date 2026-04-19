@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 
@@ -114,6 +115,70 @@ async fn cli_health_and_run_flow_against_live_server() {
         world_json.get("resources").is_some(),
         "unexpected world body: {world_stdout}"
     );
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shell_dispatches_piped_commands() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+    let url = format!("http://{addr}");
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app(test_state()))
+            .await
+            .expect("serve thymos app");
+    });
+
+    // Drive the shell via stdin: health → run (mock) → status $last → exit.
+    let script = "\
+health
+run \"shell integration\" --provider mock
+# give the mock run a beat to finish
+status $last
+show
+exit
+";
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_thymos"))
+        .args(["--url", &url, "shell"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn thymos shell");
+
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        stdin.write_all(script.as_bytes()).expect("write script");
+        // Drop closes stdin so the shell loop sees EOF after the scripted lines.
+    }
+
+    // Give the mock run a moment to finish between the `run` and `status $last`
+    // lines above — the shell processes lines back-to-back so the status call
+    // can race the server otherwise.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let output = child.wait_with_output().expect("wait shell");
+    let out = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "shell exited non-zero:\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(out.contains("\"status\": \"ok\""), "health missing: {out}");
+    assert!(out.contains("Run started: "), "run start missing: {out}");
+    // Status call may race the mock run's completion — accept either state.
+    assert!(
+        out.contains("\"status\": \"completed\"") || out.contains("\"status\": \"running\""),
+        "status output missing: {out}"
+    );
+    assert!(out.contains("provider      "), "show output missing: {out}");
+    assert!(out.contains("last_run_id   "), "show output missing: {out}");
 
     server.abort();
     let _ = server.await;

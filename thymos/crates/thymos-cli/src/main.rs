@@ -12,6 +12,8 @@
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 
+mod shell;
+
 #[derive(Parser)]
 #[command(name = "thymos", about = "Thymos governed-cognition CLI")]
 struct Cli {
@@ -83,6 +85,14 @@ enum Commands {
         #[command(subcommand)]
         action: RunsAction,
     },
+    /// Cancel a running agent.
+    Cancel {
+        /// Run ID.
+        run_id: String,
+    },
+    /// Launch an interactive Thymos shell — programmable terminal with
+    /// persistent session defaults and an `auto` autonomous loop.
+    Shell,
 }
 
 #[derive(Subcommand)]
@@ -168,6 +178,10 @@ async fn main() {
             )
             .await
         }
+        Commands::Cancel { run_id } => {
+            cmd_cancel(&client, &cli.url, cli.api_key.as_deref(), &run_id).await
+        }
+        Commands::Shell => shell::cmd_shell(&client, &cli.url, cli.api_key.as_deref()).await,
         Commands::Runs { action } => match action {
             RunsAction::Ls {
                 status,
@@ -197,7 +211,7 @@ async fn main() {
     }
 }
 
-fn auth_headers(api_key: Option<&str>) -> Vec<(String, String)> {
+pub(crate) fn auth_headers(api_key: Option<&str>) -> Vec<(String, String)> {
     let mut headers = Vec::new();
     if let Some(key) = api_key {
         headers.push(("Authorization".into(), format!("Bearer {key}")));
@@ -205,7 +219,7 @@ fn auth_headers(api_key: Option<&str>) -> Vec<(String, String)> {
     headers
 }
 
-async fn json_body_or_error(resp: reqwest::Response) -> Result<Value, String> {
+pub(crate) async fn json_body_or_error(resp: reqwest::Response) -> Result<Value, String> {
     let status = resp.status();
     let body: Value = resp.json().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
@@ -218,17 +232,18 @@ async fn json_body_or_error(resp: reqwest::Response) -> Result<Value, String> {
     Ok(body)
 }
 
-async fn cmd_run(
+/// POST /runs and return the new run id. Used by both the one-shot `run`
+/// command and the interactive shell's `run` / `auto` commands.
+pub(crate) async fn start_run(
     client: &reqwest::Client,
     url: &str,
     api_key: Option<&str>,
     task: &str,
     max_steps: u32,
     provider: &str,
-    model: Option<String>,
-    scopes: Option<String>,
-    follow: bool,
-) -> Result<(), String> {
+    model: Option<&str>,
+    scopes: Option<&str>,
+) -> Result<String, String> {
     let mut body = serde_json::json!({
         "task": task,
         "max_steps": max_steps,
@@ -250,34 +265,68 @@ async fn cmd_run(
     }
 
     let resp = req.send().await.map_err(|e| e.to_string())?;
-    let status = resp.status();
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let parsed = json_body_or_error(resp).await?;
+    parsed["run_id"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("server response missing run_id: {parsed}"))
+}
 
-    if status.is_success() || status.as_u16() == 202 {
-        let run_id = body["run_id"].as_str().unwrap_or("unknown").to_string();
-        println!("Run started: {run_id}");
-        println!("  task: {task}");
-        println!("  provider: {provider}");
-        println!();
-        if follow {
-            println!("--- streaming ---");
-            cmd_stream(url, &run_id).await?;
-            // Print final status once the stream closes.
-            return cmd_status(client, url, api_key, &run_id).await;
-        }
-        println!("Poll status:  thymos status {run_id}");
-        println!("Stream live:  thymos stream {run_id}");
-    } else {
-        println!(
-            "Error ({}): {}",
-            status,
-            serde_json::to_string_pretty(&body).unwrap()
-        );
+pub(crate) async fn cmd_run(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    task: &str,
+    max_steps: u32,
+    provider: &str,
+    model: Option<String>,
+    scopes: Option<String>,
+    follow: bool,
+) -> Result<(), String> {
+    let run_id = start_run(
+        client,
+        url,
+        api_key,
+        task,
+        max_steps,
+        provider,
+        model.as_deref(),
+        scopes.as_deref(),
+    )
+    .await?;
+
+    println!("Run started: {run_id}");
+    println!("  task: {task}");
+    println!("  provider: {provider}");
+    println!();
+    if follow {
+        println!("--- streaming ---");
+        cmd_stream(url, &run_id).await?;
+        // Print final status once the stream closes.
+        return cmd_status(client, url, api_key, &run_id).await;
     }
+    println!("Poll status:  thymos status {run_id}");
+    println!("Stream live:  thymos stream {run_id}");
     Ok(())
 }
 
-async fn cmd_status(
+pub(crate) async fn cmd_cancel(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    run_id: &str,
+) -> Result<(), String> {
+    let mut req = client.post(format!("{url}/runs/{run_id}/cancel"));
+    for (k, v) in auth_headers(api_key) {
+        req = req.header(&k, &v);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let body = json_body_or_error(resp).await?;
+    println!("{}", serde_json::to_string_pretty(&body).unwrap());
+    Ok(())
+}
+
+pub(crate) async fn cmd_status(
     client: &reqwest::Client,
     url: &str,
     api_key: Option<&str>,
@@ -294,7 +343,7 @@ async fn cmd_status(
     Ok(())
 }
 
-async fn cmd_stream(url: &str, run_id: &str) -> Result<(), String> {
+pub(crate) async fn cmd_stream(url: &str, run_id: &str) -> Result<(), String> {
     // Simple SSE client: read chunks from the stream endpoint.
     let resp = reqwest::get(format!("{url}/runs/{run_id}/stream"))
         .await
@@ -354,7 +403,7 @@ async fn cmd_stream(url: &str, run_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn cmd_world(
+pub(crate) async fn cmd_world(
     client: &reqwest::Client,
     url: &str,
     api_key: Option<&str>,
@@ -371,7 +420,7 @@ async fn cmd_world(
     Ok(())
 }
 
-async fn cmd_usage(
+pub(crate) async fn cmd_usage(
     client: &reqwest::Client,
     url: &str,
     api_key: Option<&str>,
@@ -387,7 +436,7 @@ async fn cmd_usage(
     Ok(())
 }
 
-async fn cmd_health(client: &reqwest::Client, url: &str) -> Result<(), String> {
+pub(crate) async fn cmd_health(client: &reqwest::Client, url: &str) -> Result<(), String> {
     let resp = client
         .get(format!("{url}/health"))
         .send()
@@ -398,7 +447,7 @@ async fn cmd_health(client: &reqwest::Client, url: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn cmd_approve(
+pub(crate) async fn cmd_approve(
     client: &reqwest::Client,
     url: &str,
     api_key: Option<&str>,
@@ -419,7 +468,7 @@ async fn cmd_approve(
     Ok(())
 }
 
-async fn cmd_runs_ls(
+pub(crate) async fn cmd_runs_ls(
     client: &reqwest::Client,
     url: &str,
     api_key: Option<&str>,
@@ -461,7 +510,7 @@ async fn cmd_runs_ls(
     Ok(())
 }
 
-async fn cmd_runs_show(
+pub(crate) async fn cmd_runs_show(
     client: &reqwest::Client,
     url: &str,
     api_key: Option<&str>,
@@ -496,7 +545,7 @@ async fn cmd_runs_show(
     Ok(())
 }
 
-async fn cmd_runs_diff(
+pub(crate) async fn cmd_runs_diff(
     client: &reqwest::Client,
     url: &str,
     api_key: Option<&str>,
