@@ -3,7 +3,7 @@
 # Stage 1 caches cargo's registry + built dependencies as a dedicated layer
 # so that source-only edits don't invalidate third-party compilation.
 
-FROM rust:1.80-slim AS builder
+FROM rust:1.90-slim AS builder
 
 WORKDIR /build
 
@@ -24,7 +24,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/thymos        /usr/local/bin/thymos
 
 # Stage 2: minimal runtime.
-FROM debian:bookworm-slim
+# Use trixie (glibc 2.39) to match the rust:1.90-slim builder. Bookworm
+# (glibc 2.36) cannot load binaries linked against 2.39.
+FROM debian:trixie-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
