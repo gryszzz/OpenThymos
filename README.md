@@ -4,9 +4,9 @@
 
 # 𝓣𝓱𝔂𝓶𝓸𝓼
 
-**A Rust runtime for governed LLM agents.**
+**𝙰 𝚁𝚞𝚜𝚝 𝚛𝚞𝚗𝚝𝚒𝚖𝚎 𝚏𝚘𝚛 𝚐𝚘𝚟𝚎𝚛𝚗𝚎𝚍 𝙻𝙻𝙼 𝚊𝚐𝚎𝚗𝚝𝚜..**
 
-*Cognition proposes. Runtime decides. Ledger remembers.*
+*𝘾𝙤𝙜𝙣𝙞𝙩𝙞𝙤𝙣 𝙥𝙧𝙤𝙥𝙤𝙨𝙚𝙨. 𝙍𝙪𝙣𝙩𝙞𝙢𝙚 𝙙𝙚𝙘𝙞𝙙𝙚𝙨. 𝙇𝙚𝙙𝙜𝙚𝙧 𝙧𝙚𝙢𝙚𝙢𝙗𝙚𝙧𝙨.*
 
 [![status](https://img.shields.io/badge/status-pre--alpha-orange)](#status)
 [![rust](https://img.shields.io/badge/rust-1.80%2B-orange)](https://www.rust-lang.org)
