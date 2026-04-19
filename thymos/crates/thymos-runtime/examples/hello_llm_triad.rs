@@ -77,9 +77,7 @@ fn main() -> anyhow::Result<()> {
             Box::new(c)
         }
         Err(_) => {
-            eprintln!(
-                "== cognition: MockCognition (ANTHROPIC_API_KEY not set; running offline)"
-            );
+            eprintln!("== cognition: MockCognition (ANTHROPIC_API_KEY not set; running offline)");
             Box::new(scripted_mock())
         }
     };
@@ -122,13 +120,23 @@ fn main() -> anyhow::Result<()> {
                 format!("Commit seq={} delta={}", c.body.seq, op)
             }
             EntryPayload::Rejection { reason, .. } => format!("Rejection({:?})", reason),
-            EntryPayload::PendingApproval { channel, reason, .. } => {
+            EntryPayload::PendingApproval {
+                channel, reason, ..
+            } => {
                 format!("PendingApproval({channel}: {reason})")
             }
-            EntryPayload::Delegation { child_trajectory_id, task, .. } => {
+            EntryPayload::Delegation {
+                child_trajectory_id,
+                task,
+                ..
+            } => {
                 format!("Delegation(child={child_trajectory_id}, task={task})")
             }
-            EntryPayload::Branch { source_trajectory_id, source_commit_id, note } => {
+            EntryPayload::Branch {
+                source_trajectory_id,
+                source_commit_id,
+                note,
+            } => {
                 format!("Branch(from={source_trajectory_id}@{source_commit_id}, {note})")
             }
         };

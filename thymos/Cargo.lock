@@ -2671,6 +2671,7 @@ version = "0.0.1"
 dependencies = [
  "blake3",
  "hex",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2738,12 +2739,21 @@ dependencies = [
 name = "thymos-tools"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "thymos-core",
  "tokio",
+]
+
+[[package]]
+name = "thymos-worker"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "thymos-tools",
 ]
 
 [[package]]

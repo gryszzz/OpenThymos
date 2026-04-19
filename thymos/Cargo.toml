@@ -5,6 +5,7 @@ members = [
     "crates/thymos-ledger",
     "crates/thymos-policy",
     "crates/thymos-tools",
+    "crates/thymos-worker",
     "crates/thymos-compiler",
     "crates/thymos-cognition",
     "crates/thymos-runtime",

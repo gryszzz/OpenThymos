@@ -13,12 +13,12 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use serde::Deserialize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use thymos_marketplace::{Marketplace, Package, SearchQuery};
+use thymos_marketplace::{MarketplaceService, Package, SearchQuery};
 
 /// Shared marketplace state.
-pub type MarketplaceState = Arc<Mutex<Marketplace>>;
+pub type MarketplaceState = Arc<MarketplaceService>;
 
 #[derive(Deserialize)]
 pub struct SearchParams {
@@ -29,19 +29,19 @@ pub struct SearchParams {
 }
 
 /// GET /marketplace/packages — list all packages.
-pub async fn list_packages(
-    State(mp): State<MarketplaceState>,
-) -> impl IntoResponse {
-    let mp = mp.lock().unwrap();
-    let packages: Vec<&Package> = mp.list();
+pub async fn list_packages(State(mp): State<MarketplaceState>) -> impl IntoResponse {
+    let packages = mp.list();
     let json: Vec<serde_json::Value> = packages
         .iter()
         .map(|p| serde_json::to_value(p).unwrap())
         .collect();
-    (StatusCode::OK, Json(serde_json::json!({
-        "packages": json,
-        "total": mp.total_packages(),
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "packages": json,
+            "total": mp.total_packages(),
+        })),
+    )
 }
 
 /// GET /marketplace/packages/:name — get a specific package (latest version).
@@ -49,13 +49,8 @@ pub async fn get_package(
     State(mp): State<MarketplaceState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let mp = mp.lock().unwrap();
     match mp.get(&name, None) {
-        Ok(pkg) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(pkg).unwrap()),
-        )
-            .into_response(),
+        Ok(pkg) => (StatusCode::OK, Json(serde_json::to_value(pkg).unwrap())).into_response(),
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -69,7 +64,6 @@ pub async fn publish_package(
     State(mp): State<MarketplaceState>,
     Json(pkg): Json<Package>,
 ) -> impl IntoResponse {
-    let mut mp = mp.lock().unwrap();
     match mp.publish(pkg) {
         Ok(()) => (
             StatusCode::CREATED,
@@ -89,7 +83,6 @@ pub async fn unpublish_package(
     State(mp): State<MarketplaceState>,
     Path((name, version)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let mut mp = mp.lock().unwrap();
     match mp.unpublish(&name, &version) {
         Ok(pkg) => (
             StatusCode::OK,
@@ -113,7 +106,6 @@ pub async fn search_packages(
     State(mp): State<MarketplaceState>,
     Query(params): Query<SearchParams>,
 ) -> impl IntoResponse {
-    let mp = mp.lock().unwrap();
     let query = SearchQuery {
         text: params.q,
         tags: params.tag.map(|t| vec![t]).unwrap_or_default(),
@@ -125,11 +117,12 @@ pub async fn search_packages(
         .iter()
         .map(|p| serde_json::to_value(p).unwrap())
         .collect();
+    let count = results.len();
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "results": results,
-            "count": results.len(),
+            "count": count,
         })),
     )
 }
@@ -138,7 +131,10 @@ pub async fn search_packages(
 pub fn marketplace_router(state: MarketplaceState) -> axum::Router<()> {
     use axum::routing::{delete, get};
     axum::Router::new()
-        .route("/marketplace/packages", get(list_packages).post(publish_package))
+        .route(
+            "/marketplace/packages",
+            get(list_packages).post(publish_package),
+        )
         .route("/marketplace/packages/{name}", get(get_package))
         .route(
             "/marketplace/packages/{name}/{version}",

@@ -23,8 +23,8 @@ use thymos_core::{
         ExecutionPlan, PolicyDecision, PolicyTrace, Proposal, ProposalBody, ProposalStatus,
         RejectionReason,
     },
-    writ::BudgetCost,
     world::World,
+    writ::BudgetCost,
     writ::Writ,
 };
 use thymos_policy::PolicyEngine;
@@ -68,7 +68,14 @@ pub fn compile(
     tools: &ToolRegistry,
     policy: &PolicyEngine,
 ) -> Result<Compiled> {
-    compile_with_context(intent, writ, world, tools, policy, &CompileContext::default())
+    compile_with_context(
+        intent,
+        writ,
+        world,
+        tools,
+        policy,
+        &CompileContext::default(),
+    )
 }
 
 pub fn compile_with_context(
@@ -102,19 +109,17 @@ pub fn compile_with_context(
 
     // 2. Signature check.
     if let Err(e) = writ.verify_signature() {
-        return Ok(Compiled::Rejected(RejectionReason::AuthorityVoid(
-            format!("writ signature invalid: {e}"),
-        )));
+        return Ok(Compiled::Rejected(RejectionReason::AuthorityVoid(format!(
+            "writ signature invalid: {e}"
+        ))));
     }
 
     // 3. Time-window check.
     if !writ.body.time_window.contains(ctx.now_unix) {
-        return Ok(Compiled::Rejected(RejectionReason::AuthorityVoid(
-            format!(
-                "writ time window [{}, {}] does not contain now={}",
-                writ.body.time_window.not_before, writ.body.time_window.expires_at, ctx.now_unix
-            ),
-        )));
+        return Ok(Compiled::Rejected(RejectionReason::AuthorityVoid(format!(
+            "writ time window [{}, {}] does not contain now={}",
+            writ.body.time_window.not_before, writ.body.time_window.expires_at, ctx.now_unix
+        ))));
     }
 
     // 4. Writ binding (tool scope).

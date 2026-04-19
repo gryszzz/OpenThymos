@@ -58,7 +58,10 @@ pub async fn get_audit_entries(
     State(state): State<Arc<AppState>>,
     Query(q): Query<AuditQuery>,
 ) -> impl IntoResponse {
-    let trajectory_id = q.run_id.as_deref().and_then(|id| resolve_trajectory(&state, id));
+    let trajectory_id = q
+        .run_id
+        .as_deref()
+        .and_then(|id| resolve_trajectory(&state, id));
 
     // If run_id was given but couldn't be resolved, return 404.
     if q.run_id.is_some() && trajectory_id.is_none() {
@@ -69,13 +72,11 @@ pub async fn get_audit_entries(
             .into_response();
     }
 
-    let entries = state.runtime.ledger.query_entries(
-        trajectory_id,
-        q.kind.as_deref(),
-        q.from,
-        q.to,
-        q.limit,
-    );
+    let entries =
+        state
+            .runtime
+            .ledger
+            .query_entries(trajectory_id, q.kind.as_deref(), q.from, q.to, q.limit);
 
     let entries = match entries {
         Ok(e) => e,
@@ -113,16 +114,14 @@ pub async fn get_audit_entries(
             )
                 .into_response()
         }
-        _ => {
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "entries": entries,
-                    "count": entries.len(),
-                })),
-            )
-                .into_response()
-        }
+        _ => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "entries": entries,
+                "count": entries.len(),
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -131,7 +130,10 @@ pub async fn count_audit_entries(
     State(state): State<Arc<AppState>>,
     Query(q): Query<AuditQuery>,
 ) -> impl IntoResponse {
-    let trajectory_id = q.run_id.as_deref().and_then(|id| resolve_trajectory(&state, id));
+    let trajectory_id = q
+        .run_id
+        .as_deref()
+        .and_then(|id| resolve_trajectory(&state, id));
 
     if q.run_id.is_some() && trajectory_id.is_none() {
         return (
@@ -141,17 +143,12 @@ pub async fn count_audit_entries(
             .into_response();
     }
 
-    match state.runtime.ledger.count_entries(
-        trajectory_id,
-        q.kind.as_deref(),
-        q.from,
-        q.to,
-    ) {
-        Ok(count) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "count": count })),
-        )
-            .into_response(),
+    match state
+        .runtime
+        .ledger
+        .count_entries(trajectory_id, q.kind.as_deref(), q.from, q.to)
+    {
+        Ok(count) => (StatusCode::OK, Json(serde_json::json!({ "count": count }))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),

@@ -116,8 +116,14 @@ mod tests {
 
     #[test]
     fn canonical_is_stable() {
-        let t1 = Thing { b: 2, a: "x".into() };
-        let t2 = Thing { b: 2, a: "x".into() };
+        let t1 = Thing {
+            b: 2,
+            a: "x".into(),
+        };
+        let t2 = Thing {
+            b: 2,
+            a: "x".into(),
+        };
         assert_eq!(content_hash(&t1).unwrap(), content_hash(&t2).unwrap());
     }
 

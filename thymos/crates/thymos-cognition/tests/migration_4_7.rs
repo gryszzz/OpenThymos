@@ -79,7 +79,10 @@ fn legacy_cognition_config_json_still_parses() {
     assert_eq!(cfg.model.as_deref(), Some("claude-opus-4-6"));
     assert_eq!(cfg.max_tokens, Some(2048));
     // Unset fields should take safe defaults.
-    assert!(cfg.cache_prefix, "cache_prefix must default true when absent");
+    assert!(
+        cfg.cache_prefix,
+        "cache_prefix must default true when absent"
+    );
     assert!(cfg.thinking_budget_tokens.is_none());
 }
 
@@ -150,9 +153,7 @@ mod streaming {
         crypto::{generate_signing_key, public_key_of},
         intent::{Intent, IntentBody, IntentKind},
         world::World,
-        writ::{
-            Budget, DelegationBounds, EffectCeiling, TimeWindow, ToolPattern, Writ, WritBody,
-        },
+        writ::{Budget, DelegationBounds, EffectCeiling, TimeWindow, ToolPattern, Writ, WritBody},
     };
     use thymos_tools::ToolRegistry;
 

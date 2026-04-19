@@ -31,6 +31,7 @@ const WRONG_SECRET: &[u8] = b"wrong-secret-key-at-least-32-byt!";
 fn test_state_with_jwt(jwt: Option<Arc<auth::JwtConfig>>) -> Arc<AppState> {
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     Arc::new(AppState {
+        runtime_mode: thymos_server::RuntimeMode::Reference,
         runtime: default_runtime(),
         runs: Mutex::new(HashMap::new()),
         event_channels: Mutex::new(HashMap::new()),
@@ -42,7 +43,7 @@ fn test_state_with_jwt(jwt: Option<Arc<auth::JwtConfig>>) -> Arc<AppState> {
         run_store: None,
         shutdown_tx,
         active_runs: AtomicU32::new(0),
-        marketplace: Arc::new(Mutex::new(thymos_marketplace::Marketplace::new())),
+        marketplace: Arc::new(thymos_marketplace::MarketplaceService::in_memory()),
     })
 }
 
@@ -144,7 +145,10 @@ async fn protected_route_rejects_garbage_bearer_token() {
     resp.assert_status(axum::http::StatusCode::UNAUTHORIZED);
     let body: Value = resp.json();
     assert!(
-        body["error"].as_str().unwrap_or("").contains("JWT verification failed"),
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("JWT verification failed"),
         "expected JWT verification failure, got: {body}"
     );
 }
@@ -195,8 +199,14 @@ async fn jwt_tenant_claim_isolates_runs() {
     let state = test_state_with_jwt(Some(jwt_config_default()));
     let server = TestServer::new(app(state));
 
-    let token_a = sign(&make_claims("user-a", Some("tenant-a"), u64::MAX), TEST_SECRET);
-    let token_b = sign(&make_claims("user-b", Some("tenant-b"), u64::MAX), TEST_SECRET);
+    let token_a = sign(
+        &make_claims("user-a", Some("tenant-a"), u64::MAX),
+        TEST_SECRET,
+    );
+    let token_b = sign(
+        &make_claims("user-b", Some("tenant-b"), u64::MAX),
+        TEST_SECRET,
+    );
 
     // Tenant A creates a run.
     let resp = server
@@ -230,8 +240,7 @@ async fn jwt_tenant_claim_isolates_runs() {
     // Either 403 or 404 is acceptable depending on leak policy.
     let status = resp.status_code();
     assert!(
-        status == axum::http::StatusCode::FORBIDDEN
-            || status == axum::http::StatusCode::NOT_FOUND,
+        status == axum::http::StatusCode::FORBIDDEN || status == axum::http::StatusCode::NOT_FOUND,
         "expected 403 or 404 for cross-tenant read, got {status}"
     );
 }

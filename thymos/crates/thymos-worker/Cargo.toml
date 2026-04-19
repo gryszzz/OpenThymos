@@ -1,0 +1,15 @@
+[package]
+name = "thymos-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "thymos-worker"
+path = "src/main.rs"
+
+[dependencies]
+thymos-tools = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

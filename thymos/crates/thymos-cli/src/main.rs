@@ -89,17 +89,43 @@ async fn main() {
             provider,
             model,
             scopes,
-        } => cmd_run(&client, &cli.url, cli.api_key.as_deref(), &task, max_steps, &provider, model, scopes).await,
-        Commands::Status { run_id } => cmd_status(&client, &cli.url, cli.api_key.as_deref(), &run_id).await,
+        } => {
+            cmd_run(
+                &client,
+                &cli.url,
+                cli.api_key.as_deref(),
+                &task,
+                max_steps,
+                &provider,
+                model,
+                scopes,
+            )
+            .await
+        }
+        Commands::Status { run_id } => {
+            cmd_status(&client, &cli.url, cli.api_key.as_deref(), &run_id).await
+        }
         Commands::Stream { run_id } => cmd_stream(&cli.url, &run_id).await,
-        Commands::World { run_id } => cmd_world(&client, &cli.url, cli.api_key.as_deref(), &run_id).await,
+        Commands::World { run_id } => {
+            cmd_world(&client, &cli.url, cli.api_key.as_deref(), &run_id).await
+        }
         Commands::Usage => cmd_usage(&client, &cli.url, cli.api_key.as_deref()).await,
         Commands::Health => cmd_health(&client, &cli.url).await,
         Commands::Approve {
             run_id,
             channel,
             deny,
-        } => cmd_approve(&client, &cli.url, cli.api_key.as_deref(), &run_id, &channel, !deny).await,
+        } => {
+            cmd_approve(
+                &client,
+                &cli.url,
+                cli.api_key.as_deref(),
+                &run_id,
+                &channel,
+                !deny,
+            )
+            .await
+        }
     };
 
     if let Err(e) = result {
@@ -159,7 +185,11 @@ async fn cmd_run(
         println!("Poll status:  thymos status {run_id}");
         println!("Stream live:  thymos stream {run_id}");
     } else {
-        println!("Error ({}): {}", status, serde_json::to_string_pretty(&body).unwrap());
+        println!(
+            "Error ({}): {}",
+            status,
+            serde_json::to_string_pretty(&body).unwrap()
+        );
     }
     Ok(())
 }
@@ -215,10 +245,7 @@ async fn cmd_stream(url: &str, run_id: &str) -> Result<(), String> {
                                 print!("{}", evt["text"].as_str().unwrap_or(""));
                             }
                             Some("tool_use_start") => {
-                                println!(
-                                    "\n[tool: {}]",
-                                    evt["tool"].as_str().unwrap_or("?")
-                                );
+                                println!("\n[tool: {}]", evt["tool"].as_str().unwrap_or("?"));
                             }
                             Some("tool_use_done") => {
                                 println!("[/tool]");
@@ -231,10 +258,7 @@ async fn cmd_stream(url: &str, run_id: &str) -> Result<(), String> {
                                 println!("\n[turn complete: {} intents]", evt["intents_count"]);
                             }
                             Some("error") => {
-                                eprintln!(
-                                    "[error: {}]",
-                                    evt["message"].as_str().unwrap_or("?")
-                                );
+                                eprintln!("[error: {}]", evt["message"].as_str().unwrap_or("?"));
                             }
                             _ => {}
                         }

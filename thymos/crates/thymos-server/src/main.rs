@@ -14,55 +14,116 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use thymos_server::{app, auth, default_runtime, persistent_runtime, middleware, run_store, telemetry, AppState};
+use thymos_server::{
+    app, auth, default_runtime, middleware, persistent_runtime, run_store, telemetry, AppState,
+    RuntimeMode, ServerConfig,
+};
 
 #[tokio::main]
 async fn main() {
     telemetry::init();
 
-    let runtime = if let Ok(path) = std::env::var("THYMOS_LEDGER_PATH") {
-        eprintln!("ledger: {path}");
-        persistent_runtime(&path)
+    let config = match ServerConfig::from_env() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!("configuration error: {err}");
+            std::process::exit(2);
+        }
+    };
+
+    if let Some(url) = &config.postgres_url {
+        eprintln!(
+            "note: THYMOS_POSTGRES_URL is set to '{url}', but the HTTP runtime still uses the synchronous SQLite ledger path until the runtime/ledger trait refactor lands"
+        );
+    }
+
+    let runtime = if let Some(path) = &config.ledger_path {
+        eprintln!("ledger: sqlite file-backed at {path}");
+        persistent_runtime(path)
     } else {
-        eprintln!("ledger: in-memory (set THYMOS_LEDGER_PATH for persistence)");
+        eprintln!("ledger: in-memory reference mode");
         default_runtime()
     };
 
     // Optional: configure API gateway from environment.
-    let gateway = if std::env::var("THYMOS_API_KEYS").is_ok() {
-        let mut gw = middleware::ApiGateway::new();
+    let gateway_store = match middleware::ApiKeyStore::open(&config.gateway_db_path) {
+        Ok(store) => {
+            eprintln!("api gateway store: {}", config.gateway_db_path);
+            Some(Arc::new(store))
+        }
+        Err(e) => {
+            eprintln!(
+                "warn: failed to open API gateway store at {}: {}",
+                config.gateway_db_path, e
+            );
+            None
+        }
+    };
+    let gateway = {
+        let mut gw = match &gateway_store {
+            Some(store) => match middleware::ApiGateway::new().with_store(store.clone()) {
+                Ok(gw) => gw,
+                Err(e) => {
+                    eprintln!("warn: failed to load persisted API keys: {e}");
+                    middleware::ApiGateway::new()
+                }
+            },
+            None => middleware::ApiGateway::new(),
+        };
+
         if let Ok(keys_str) = std::env::var("THYMOS_API_KEYS") {
-            for entry in keys_str.split(',') {
+            for entry in keys_str.split(',').filter(|s| !s.trim().is_empty()) {
                 let parts: Vec<&str> = entry.split(':').collect();
                 if parts.len() >= 4 {
-                    gw.add_key(middleware::ApiKey {
+                    if let Err(err) = gw.add_key(middleware::ApiKey {
                         key: parts[0].to_string(),
                         tenant_id: parts[1].to_string(),
                         name: parts[2].to_string(),
                         rate_limit_rpm: parts[3].parse().unwrap_or(60),
-                    });
+                    }) {
+                        eprintln!("warn: failed to persist API key '{}': {err}", parts[2]);
+                    }
                 }
             }
         }
-        eprintln!("API gateway enabled");
-        Some(Arc::new(gw))
-    } else {
-        None
-    };
 
-    // Persistent run store. Use THYMOS_DB_PATH or default to ./thymos-runs.db.
-    let db_path = std::env::var("THYMOS_DB_PATH")
-        .unwrap_or_else(|_| "thymos-runs.db".into());
-    let run_store = match run_store::RunStore::open(&db_path) {
-        Ok(store) => {
-            eprintln!("run store: {db_path}");
-            Some(Arc::new(store))
-        }
-        Err(e) => {
-            eprintln!("warn: failed to open run store at {db_path}: {e}");
+        if !gw.usage_stats().is_empty() || gateway_store.is_some() {
+            eprintln!("API gateway enabled");
+            Some(Arc::new(gw))
+        } else {
             None
         }
     };
+
+    // Persistent run store. Use THYMOS_DB_PATH or default to ./thymos-runs.db.
+    let run_store = match run_store::RunStore::open(&config.run_db_path) {
+        Ok(store) => {
+            eprintln!("run store: {}", config.run_db_path);
+            Some(Arc::new(store))
+        }
+        Err(e) => {
+            eprintln!(
+                "warn: failed to open run store at {}: {e}",
+                config.run_db_path
+            );
+            None
+        }
+    };
+
+    let marketplace =
+        match thymos_marketplace::MarketplaceService::open_sqlite(&config.marketplace_db_path) {
+            Ok(service) => {
+                eprintln!("marketplace store: {}", config.marketplace_db_path);
+                Arc::new(service)
+            }
+            Err(e) => {
+                eprintln!(
+                    "warn: failed to open marketplace store at {}: {}",
+                    config.marketplace_db_path, e
+                );
+                Arc::new(thymos_marketplace::MarketplaceService::in_memory())
+            }
+        };
 
     // Restore previously persisted runs into memory.
     let mut restored_runs = HashMap::new();
@@ -84,6 +145,7 @@ async fn main() {
     let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
 
     let state = Arc::new(AppState {
+        runtime_mode: config.runtime_mode,
         runtime,
         runs: Mutex::new(restored_runs),
         event_channels: Mutex::new(HashMap::new()),
@@ -95,12 +157,18 @@ async fn main() {
         run_store,
         shutdown_tx,
         active_runs: AtomicU32::new(0),
-        marketplace: Arc::new(Mutex::new(thymos_marketplace::Marketplace::new())),
+        marketplace,
     });
 
     let app = app(state.clone());
     let addr = "0.0.0.0:3001";
-    eprintln!("thymos-server listening on {addr}");
+    eprintln!(
+        "thymos-server listening on {addr} ({})",
+        match config.runtime_mode {
+            RuntimeMode::Reference => "reference mode",
+            RuntimeMode::Production => "production mode",
+        }
+    );
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -137,7 +205,10 @@ async fn main() {
                     break;
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    eprintln!("shutdown timeout: {} runs still active, forcing exit", active);
+                    eprintln!(
+                        "shutdown timeout: {} runs still active, forcing exit",
+                        active
+                    );
                     // Mark running runs as failed so they can be resumed.
                     let mut runs = state_for_shutdown.runs.lock().unwrap();
                     for (_id, rec) in runs.iter_mut() {

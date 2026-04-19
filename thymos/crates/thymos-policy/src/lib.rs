@@ -119,10 +119,7 @@ impl Policy for TenantIsolationPolicy {
         if let Some(key) = intent.body.args.get("key").and_then(|v| v.as_str()) {
             if let Some(prefix) = key.split('/').next() {
                 // If the key has a tenant prefix and it doesn't match, deny.
-                if !prefix.is_empty()
-                    && prefix != tenant_id.as_str()
-                    && key.contains('/')
-                {
+                if !prefix.is_empty() && prefix != tenant_id.as_str() && key.contains('/') {
                     return PolicyDecision::Deny(format!(
                         "tenant '{}' cannot access resource with prefix '{}'",
                         tenant_id, prefix

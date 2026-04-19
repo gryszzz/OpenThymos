@@ -72,7 +72,8 @@ thymos/
 ├── thymos-core        Core types: ContentHash, Writ, Budget, Delta, Commit
 ├── thymos-ledger      Append-only ledger (SQLite / Postgres backends)
 ├── thymos-policy      Policy engine (trait + stock policies)
-├── thymos-tools       Tool registry, stock tools (shell, KV, HTTP, delegate)
+├── thymos-tools       Tool registry, secure tool fabric, stock tools
+├── thymos-worker      Worker binary for subprocess-isolated tool execution
 ├── thymos-compiler    Intent → Proposal compiler
 ├── thymos-cognition   LLM adapters (Anthropic, OpenAI, Local, Mock)
 ├── thymos-runtime     Agent loop, world projection, async streaming
@@ -121,3 +122,17 @@ Both can be bypassed for development. The `/health` endpoint always skips auth.
   (task, status, summary). Runs are restored into memory on server startup.
 - **Ledger**: SQLite or Postgres. The ledger is the source of truth for all
   agent actions and can be queried via the audit API.
+
+## Secure Tool Fabric
+
+Thymos now has a first secure-tool-fabric seam for high-risk tools.
+
+- `shell` and `http` execute through a worker request/response contract
+- default `in_process` mode preserves the reference implementation
+- `worker` mode pushes execution into the `thymos-worker` subprocess
+- shell observations now include THYMOS-native execution receipts
+
+Worker mode is enabled with:
+
+- `THYMOS_TOOL_FABRIC=worker`
+- `THYMOS_WORKER_BIN=/absolute/path/to/thymos-worker`

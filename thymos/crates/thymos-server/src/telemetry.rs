@@ -4,18 +4,14 @@
 //! Otherwise, structured JSON logs go to stderr with `RUST_LOG` filtering.
 
 use opentelemetry::trace::TracerProvider;
-use tracing_subscriber::{
-    layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
-};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// Initialize tracing. Call once at startup before any spans are created.
 pub fn init() {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("thymos=info,tower_http=info"));
 
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .json()
-        .with_target(true);
+    let fmt_layer = tracing_subscriber::fmt::layer().json().with_target(true);
 
     // Try to set up OTLP exporter if endpoint is configured.
     if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
@@ -26,9 +22,11 @@ pub fn init() {
 
         let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
             .with_batch_exporter(exporter)
-            .with_resource(opentelemetry_sdk::Resource::builder()
-                .with_service_name("thymos-server")
-                .build())
+            .with_resource(
+                opentelemetry_sdk::Resource::builder()
+                    .with_service_name("thymos-server")
+                    .build(),
+            )
             .build();
 
         let tracer = provider.tracer("thymos");

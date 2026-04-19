@@ -5,13 +5,15 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use thymos_core::{
-    canonical_json_bytes, content_hash, CommitId, ContentHash, Error, Result, TrajectoryId,
+    canonical_json_bytes,
     commit::Commit,
-    proposal::{Proposal, RejectionReason},
+    content_hash,
     ids::IntentId,
+    proposal::{Proposal, RejectionReason},
+    CommitId, ContentHash, Error, Result, TrajectoryId,
 };
 
-use crate::{AuditEntry, Entry, EntryKind, EntryPayload, build_entry};
+use crate::{build_entry, AuditEntry, Entry, EntryKind, EntryPayload};
 
 pub struct SqliteLedger {
     conn: Mutex<Connection>,
@@ -199,13 +201,7 @@ impl SqliteLedger {
             source_commit_id,
             note: note.to_string(),
         };
-        let entry = build_entry(
-            new_trajectory_id,
-            None,
-            0,
-            EntryKind::Branch,
-            payload,
-        )?;
+        let entry = build_entry(new_trajectory_id, None, 0, EntryKind::Branch, payload)?;
         self.insert_entry(&entry, true)?;
         Ok(entry)
     }
@@ -312,7 +308,14 @@ impl SqliteLedger {
                 let kind_str: String = row.get(4)?;
                 let payload_bytes: Vec<u8> = row.get(5)?;
                 let created_at: i64 = row.get(6)?;
-                Ok((id_bytes, traj_bytes, seq, kind_str, payload_bytes, created_at))
+                Ok((
+                    id_bytes,
+                    traj_bytes,
+                    seq,
+                    kind_str,
+                    payload_bytes,
+                    created_at,
+                ))
             })
             .map_err(|e| Error::Ledger(e.to_string()))?;
 
@@ -320,8 +323,8 @@ impl SqliteLedger {
         for row in rows {
             let (id_bytes, traj_bytes, seq, kind_str, payload_bytes, created_at) =
                 row.map_err(|e| Error::Ledger(e.to_string()))?;
-            let payload: EntryPayload = serde_json::from_slice(&payload_bytes)
-                .map_err(|e| Error::Ledger(e.to_string()))?;
+            let payload: EntryPayload =
+                serde_json::from_slice(&payload_bytes).map_err(|e| Error::Ledger(e.to_string()))?;
             out.push(AuditEntry {
                 id: hex::encode(&id_bytes),
                 trajectory_id: hex::encode(&traj_bytes),
@@ -389,12 +392,11 @@ impl SqliteLedger {
 
     // ---- internals ----
 
-    fn current_head(
-        conn: &Connection,
-        trajectory_id: TrajectoryId,
-    ) -> Result<(ContentHash, u64)> {
+    fn current_head(conn: &Connection, trajectory_id: TrajectoryId) -> Result<(ContentHash, u64)> {
         let mut stmt = conn
-            .prepare("SELECT head_id, head_seq FROM heads WHERE trajectory_id = ?1 AND branch = 'main'")
+            .prepare(
+                "SELECT head_id, head_seq FROM heads WHERE trajectory_id = ?1 AND branch = 'main'",
+            )
             .map_err(|e| Error::Ledger(e.to_string()))?;
         let mut rows = stmt
             .query(params![trajectory_id.0.as_bytes().as_slice()])
@@ -420,7 +422,9 @@ impl SqliteLedger {
 
         let recomputed = blake3::hash(&payload_bytes);
         if recomputed.as_bytes() != entry.id.as_bytes() {
-            return Err(Error::Invariant("entry id does not match payload hash".into()));
+            return Err(Error::Invariant(
+                "entry id does not match payload hash".into(),
+            ));
         }
 
         let now = std::time::SystemTime::now()
@@ -490,8 +494,9 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         )
     })?;
 
-    let payload: EntryPayload = serde_json::from_slice(&payload_bytes)
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e)))?;
+    let payload: EntryPayload = serde_json::from_slice(&payload_bytes).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e))
+    })?;
 
     Ok(Entry {
         id: ContentHash(id_arr),

@@ -8,28 +8,28 @@
 //!   * A `Proposal` is the only thing the scheduler may execute.
 //!   * Every mutation is authorized by exactly one `Writ`.
 
+pub mod commit;
 pub mod crypto;
+pub mod delta;
+pub mod error;
 pub mod hash;
 pub mod ids;
-pub mod writ;
 pub mod intent;
 pub mod proposal;
-pub mod commit;
-pub mod delta;
 pub mod world;
-pub mod error;
+pub mod writ;
 
+pub use commit::{Commit, CommitBody};
+pub use delta::{DeltaOp, StructuredDelta};
 pub use error::{Error, Result};
 pub use hash::{canonical_json_bytes, content_hash, ContentHash};
 pub use ids::{CommitId, IntentId, ProposalId, TrajectoryId, WritId};
-pub use writ::{Budget, EffectCeiling, ToolPattern, Writ, WritBody};
 pub use intent::{Intent, IntentBody, IntentKind};
 pub use proposal::{
     ExecutionPlan, PolicyTrace, Proposal, ProposalBody, ProposalStatus, RejectionReason,
 };
-pub use commit::{Commit, CommitBody};
-pub use delta::{DeltaOp, StructuredDelta};
 pub use world::{ResourceKey, World};
+pub use writ::{Budget, EffectCeiling, ToolPattern, Writ, WritBody};
 
 /// The compiler / protocol version stamped into every commit for replay fidelity.
 pub const COMPILER_VERSION: &str = "thymos-compiler/0.0.1";

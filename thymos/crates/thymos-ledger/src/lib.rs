@@ -13,17 +13,18 @@
 use serde::{Deserialize, Serialize};
 
 use thymos_core::{
-    content_hash, CommitId, ContentHash, Error, Result, TrajectoryId,
     commit::Commit,
-    proposal::{Proposal, RejectionReason},
+    content_hash,
     ids::IntentId,
+    proposal::{Proposal, RejectionReason},
+    CommitId, ContentHash, Error, Result, TrajectoryId,
 };
 
 // Backend modules.
-#[cfg(feature = "sqlite")]
-pub mod sqlite;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 
 // Re-export the default backend as `Ledger`.
 #[cfg(feature = "sqlite")]
@@ -54,7 +55,9 @@ pub enum EntryKind {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EntryPayload {
-    Root { note: String },
+    Root {
+        note: String,
+    },
     Commit(Commit),
     Rejection {
         intent_id: IntentId,

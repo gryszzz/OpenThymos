@@ -143,7 +143,10 @@ fn run_agent_stops_at_max_steps() {
     .expect("agent run");
 
     assert_eq!(summary.steps_executed, 2);
-    assert!(matches!(summary.terminated_by, Termination::MaxStepsReached));
+    assert!(matches!(
+        summary.terminated_by,
+        Termination::MaxStepsReached
+    ));
     assert!(summary.final_answer.is_none());
 }
 

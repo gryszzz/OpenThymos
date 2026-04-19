@@ -15,6 +15,7 @@ use thymos_server::{app, auth, default_runtime, middleware, AppState};
 fn test_state() -> Arc<AppState> {
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     Arc::new(AppState {
+        runtime_mode: thymos_server::RuntimeMode::Reference,
         runtime: default_runtime(),
         runs: Mutex::new(HashMap::new()),
         event_channels: Mutex::new(HashMap::new()),
@@ -26,7 +27,7 @@ fn test_state() -> Arc<AppState> {
         run_store: None,
         shutdown_tx,
         active_runs: AtomicU32::new(0),
-        marketplace: Arc::new(Mutex::new(thymos_marketplace::Marketplace::new())),
+        marketplace: Arc::new(thymos_marketplace::MarketplaceService::in_memory()),
     })
 }
 
@@ -298,6 +299,7 @@ fn jwt_test_state() -> Arc<AppState> {
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let jwt_config = Arc::new(auth::JwtConfig::from_secret(b"test-secret-key"));
     Arc::new(AppState {
+        runtime_mode: thymos_server::RuntimeMode::Reference,
         runtime: default_runtime(),
         runs: Mutex::new(HashMap::new()),
         event_channels: Mutex::new(HashMap::new()),
@@ -309,7 +311,7 @@ fn jwt_test_state() -> Arc<AppState> {
         run_store: None,
         shutdown_tx,
         active_runs: AtomicU32::new(0),
-        marketplace: Arc::new(Mutex::new(thymos_marketplace::Marketplace::new())),
+        marketplace: Arc::new(thymos_marketplace::MarketplaceService::in_memory()),
     })
 }
 
@@ -321,8 +323,10 @@ fn gateway_test_state() -> Arc<AppState> {
         tenant_id: "tenant-test".into(),
         name: "TestKey".into(),
         rate_limit_rpm: 10,
-    });
+    })
+    .unwrap();
     Arc::new(AppState {
+        runtime_mode: thymos_server::RuntimeMode::Reference,
         runtime: default_runtime(),
         runs: Mutex::new(HashMap::new()),
         event_channels: Mutex::new(HashMap::new()),
@@ -334,7 +338,7 @@ fn gateway_test_state() -> Arc<AppState> {
         run_store: None,
         shutdown_tx,
         active_runs: AtomicU32::new(0),
-        marketplace: Arc::new(Mutex::new(thymos_marketplace::Marketplace::new())),
+        marketplace: Arc::new(thymos_marketplace::MarketplaceService::in_memory()),
     })
 }
 
@@ -344,10 +348,7 @@ async fn jwt_rejects_unauthenticated_request() {
     let server = test_server(state);
 
     // No token → 401
-    let resp = server
-        .post("/runs")
-        .json(&json!({ "task": "test" }))
-        .await;
+    let resp = server.post("/runs").json(&json!({ "task": "test" })).await;
     resp.assert_status(axum::http::StatusCode::UNAUTHORIZED);
 }
 
@@ -421,10 +422,7 @@ async fn gateway_rejects_missing_key() {
     let state = gateway_test_state();
     let server = test_server(state);
 
-    let resp = server
-        .post("/runs")
-        .json(&json!({ "task": "test" }))
-        .await;
+    let resp = server.post("/runs").json(&json!({ "task": "test" })).await;
     resp.assert_status(axum::http::StatusCode::UNAUTHORIZED);
 }
 

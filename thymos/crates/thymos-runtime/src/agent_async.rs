@@ -19,8 +19,8 @@ use thymos_core::{
 };
 use thymos_ledger::{Entry, EntryPayload};
 
-use crate::{Run, Runtime, Step};
 use super::agent::{AgentRunOptions, AgentRunSummary, Termination};
+use crate::{Run, Runtime, Step};
 
 /// Approval decision sent through the approval channel.
 #[derive(Debug, Clone)]
@@ -31,8 +31,11 @@ pub struct ApprovalDecision {
 /// Callback for requesting approvals from an external system (e.g. HTTP endpoint).
 /// The agent loop calls `request_approval` when a proposal is suspended; the
 /// returned `oneshot::Receiver` resolves when the operator decides.
-pub type ApprovalRequester =
-    Box<dyn Fn(String, ProposalId, String, String) -> tokio::sync::oneshot::Receiver<ApprovalDecision> + Send + Sync>;
+pub type ApprovalRequester = Box<
+    dyn Fn(String, ProposalId, String, String) -> tokio::sync::oneshot::Receiver<ApprovalDecision>
+        + Send
+        + Sync,
+>;
 
 /// Run an async agent loop with streaming cognition events.
 ///
@@ -199,8 +202,7 @@ pub async fn run_agent_streaming(
                                     match step_result {
                                         Step::Committed(commit_id) => {
                                             commits += 1;
-                                            let observation =
-                                                last_observation(&run, commit_id)?;
+                                            let observation = last_observation(&run, commit_id)?;
                                             since_last.push(HistoryItem::Committed {
                                                 intent,
                                                 observation,
@@ -298,10 +300,7 @@ fn find_last_pending_proposal(run: &Run<'_>) -> Result<ProposalId> {
 }
 
 /// Fetch the Observation from the commit that just landed.
-fn last_observation(
-    run: &Run<'_>,
-    commit_id: thymos_core::CommitId,
-) -> Result<Observation> {
+fn last_observation(run: &Run<'_>, commit_id: thymos_core::CommitId) -> Result<Observation> {
     let entries: Vec<Entry> = run.runtime().ledger.entries(run.trajectory_id())?;
     for e in entries.into_iter().rev() {
         if let EntryPayload::Commit(c) = &e.payload {

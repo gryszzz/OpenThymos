@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Mutex;
 use thiserror::Error;
 
 // ── Error ────────────────────────────────────────────────────────────────────
@@ -119,6 +120,222 @@ pub struct Marketplace {
     packages: HashMap<String, HashMap<String, Package>>,
 }
 
+/// SQLite-backed package store for persistent marketplace state.
+pub struct SqliteMarketplaceStore {
+    conn: Mutex<rusqlite::Connection>,
+}
+
+impl SqliteMarketplaceStore {
+    pub fn open(path: &str) -> Result<Self, MarketplaceError> {
+        let conn = rusqlite::Connection::open(path)
+            .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))?;
+        Self::bootstrap(&conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    pub fn open_in_memory() -> Result<Self, MarketplaceError> {
+        let conn = rusqlite::Connection::open_in_memory()
+            .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))?;
+        Self::bootstrap(&conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    fn bootstrap(conn: &rusqlite::Connection) -> Result<(), MarketplaceError> {
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+
+            CREATE TABLE IF NOT EXISTS marketplace_packages (
+                name           TEXT NOT NULL,
+                version        TEXT NOT NULL,
+                description    TEXT NOT NULL,
+                author         TEXT NOT NULL,
+                tags_json      TEXT NOT NULL,
+                kind_json      TEXT NOT NULL,
+                content_hash   TEXT NOT NULL,
+                published_at   TEXT NOT NULL DEFAULT '',
+                created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (name, version)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_marketplace_packages_name
+                ON marketplace_packages(name);
+            "#,
+        )
+        .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))
+    }
+
+    pub fn load_all(&self) -> Result<Vec<Package>, MarketplaceError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, version, description, author, tags_json, kind_json, content_hash, published_at
+                 FROM marketplace_packages
+                 ORDER BY name ASC, version ASC",
+            )
+            .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let tags_json: String = row.get(4)?;
+                let kind_json: String = row.get(5)?;
+                let tags: Vec<String> = serde_json::from_str(&tags_json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        tags_json.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?;
+                let kind: PackageKind = serde_json::from_str(&kind_json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        kind_json.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?;
+
+                Ok(Package {
+                    name: row.get(0)?,
+                    version: row.get(1)?,
+                    description: row.get(2)?,
+                    author: row.get(3)?,
+                    tags,
+                    kind,
+                    content_hash: row.get(6)?,
+                    published_at: row.get(7)?,
+                })
+            })
+            .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))?;
+
+        let mut packages = Vec::new();
+        for row in rows {
+            packages.push(row.map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))?);
+        }
+        Ok(packages)
+    }
+
+    pub fn publish(&self, pkg: &Package) -> Result<(), MarketplaceError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO marketplace_packages
+                (name, version, description, author, tags_json, kind_json, content_hash, published_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                pkg.name,
+                pkg.version,
+                pkg.description,
+                pkg.author,
+                serde_json::to_string(&pkg.tags)
+                    .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))?,
+                serde_json::to_string(&pkg.kind)
+                    .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))?,
+                pkg.content_hash,
+                pkg.published_at,
+            ],
+        )
+        .map_err(|e| {
+            if matches!(e, rusqlite::Error::SqliteFailure(_, Some(_))) {
+                MarketplaceError::VersionConflict {
+                    name: pkg.name.clone(),
+                    version: pkg.version.clone(),
+                }
+            } else {
+                MarketplaceError::InvalidManifest(e.to_string())
+            }
+        })?;
+        Ok(())
+    }
+
+    pub fn unpublish(&self, name: &str, version: &str) -> Result<(), MarketplaceError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn
+            .execute(
+                "DELETE FROM marketplace_packages WHERE name = ?1 AND version = ?2",
+                rusqlite::params![name, version],
+            )
+            .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))?;
+        if affected == 0 {
+            return Err(MarketplaceError::NotFound(format!("{name}@{version}")));
+        }
+        Ok(())
+    }
+}
+
+/// Marketplace facade that keeps an in-memory index while persisting package
+/// operations to an optional SQLite store.
+pub struct MarketplaceService {
+    registry: Mutex<Marketplace>,
+    store: Option<SqliteMarketplaceStore>,
+}
+
+impl MarketplaceService {
+    pub fn in_memory() -> Self {
+        Self {
+            registry: Mutex::new(Marketplace::new()),
+            store: None,
+        }
+    }
+
+    pub fn with_store(store: SqliteMarketplaceStore) -> Result<Self, MarketplaceError> {
+        let mut registry = Marketplace::new();
+        for pkg in store.load_all()? {
+            registry.publish(pkg)?;
+        }
+        Ok(Self {
+            registry: Mutex::new(registry),
+            store: Some(store),
+        })
+    }
+
+    pub fn open_sqlite(path: &str) -> Result<Self, MarketplaceError> {
+        Self::with_store(SqliteMarketplaceStore::open(path)?)
+    }
+
+    pub fn list(&self) -> Vec<Package> {
+        let registry = self.registry.lock().unwrap();
+        registry.list().into_iter().cloned().collect()
+    }
+
+    pub fn total_packages(&self) -> usize {
+        self.registry.lock().unwrap().total_packages()
+    }
+
+    pub fn get(&self, name: &str, version: Option<&str>) -> Result<Package, MarketplaceError> {
+        self.registry.lock().unwrap().get(name, version).cloned()
+    }
+
+    pub fn search(&self, query: &SearchQuery) -> Vec<Package> {
+        let registry = self.registry.lock().unwrap();
+        registry.search(query).into_iter().cloned().collect()
+    }
+
+    pub fn publish(&self, pkg: Package) -> Result<(), MarketplaceError> {
+        let mut registry = self.registry.lock().unwrap();
+        registry.publish(pkg.clone())?;
+        if let Some(store) = &self.store {
+            if let Err(err) = store.publish(&pkg) {
+                let _ = registry.unpublish(&pkg.name, &pkg.version);
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn unpublish(&self, name: &str, version: &str) -> Result<Package, MarketplaceError> {
+        let mut registry = self.registry.lock().unwrap();
+        let pkg = registry.unpublish(name, version)?;
+        if let Some(store) = &self.store {
+            store.unpublish(name, version)?;
+        }
+        Ok(pkg)
+    }
+}
+
 impl Marketplace {
     pub fn new() -> Self {
         Self::default()
@@ -216,11 +433,7 @@ impl Marketplace {
     }
 
     /// Remove a specific version. Returns the removed package if found.
-    pub fn unpublish(
-        &mut self,
-        name: &str,
-        version: &str,
-    ) -> Result<Package, MarketplaceError> {
+    pub fn unpublish(&mut self, name: &str, version: &str) -> Result<Package, MarketplaceError> {
         let versions = self
             .packages
             .get_mut(name)
@@ -275,6 +488,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sqlite_store_roundtrip() {
+        let store = SqliteMarketplaceStore::open_in_memory().unwrap();
+        let pkg = sample_manifest_pkg("thymos/test", "1.0.0");
+        store.publish(&pkg).unwrap();
+
+        let loaded = store.load_all().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "thymos/test");
+        assert_eq!(loaded[0].version, "1.0.0");
+    }
+
+    #[test]
+    fn marketplace_service_rehydrates_from_store() {
+        let store = SqliteMarketplaceStore::open_in_memory().unwrap();
+        store
+            .publish(&sample_manifest_pkg("thymos/test", "1.0.0"))
+            .unwrap();
+
+        let service = MarketplaceService::with_store(store).unwrap();
+        let pkg = service.get("thymos/test", None).unwrap();
+        assert_eq!(pkg.version, "1.0.0");
+    }
+
     fn sample_mcp_pkg(name: &str, version: &str) -> Package {
         Package {
             name: name.into(),
@@ -295,7 +532,8 @@ mod tests {
     #[test]
     fn publish_and_get() {
         let mut mp = Marketplace::new();
-        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0")).unwrap();
+        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0"))
+            .unwrap();
 
         let pkg = mp.get("thymos/kv", Some("0.1.0")).unwrap();
         assert_eq!(pkg.name, "thymos/kv");
@@ -305,8 +543,10 @@ mod tests {
     #[test]
     fn get_latest_version() {
         let mut mp = Marketplace::new();
-        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0")).unwrap();
-        mp.publish(sample_manifest_pkg("thymos/kv", "0.2.0")).unwrap();
+        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0"))
+            .unwrap();
+        mp.publish(sample_manifest_pkg("thymos/kv", "0.2.0"))
+            .unwrap();
 
         let pkg = mp.get("thymos/kv", None).unwrap();
         assert_eq!(pkg.version, "0.2.0");
@@ -315,16 +555,21 @@ mod tests {
     #[test]
     fn version_conflict() {
         let mut mp = Marketplace::new();
-        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0")).unwrap();
-        let err = mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0")).unwrap_err();
+        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0"))
+            .unwrap();
+        let err = mp
+            .publish(sample_manifest_pkg("thymos/kv", "0.1.0"))
+            .unwrap_err();
         assert!(matches!(err, MarketplaceError::VersionConflict { .. }));
     }
 
     #[test]
     fn search_by_text() {
         let mut mp = Marketplace::new();
-        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0")).unwrap();
-        mp.publish(sample_mcp_pkg("community/weather", "1.0.0")).unwrap();
+        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0"))
+            .unwrap();
+        mp.publish(sample_mcp_pkg("community/weather", "1.0.0"))
+            .unwrap();
 
         let results = mp.search(&SearchQuery {
             text: Some("weather".into()),
@@ -337,8 +582,10 @@ mod tests {
     #[test]
     fn search_by_tag() {
         let mut mp = Marketplace::new();
-        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0")).unwrap();
-        mp.publish(sample_mcp_pkg("community/weather", "1.0.0")).unwrap();
+        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0"))
+            .unwrap();
+        mp.publish(sample_mcp_pkg("community/weather", "1.0.0"))
+            .unwrap();
 
         let results = mp.search(&SearchQuery {
             tags: vec!["mcp".into()],
@@ -351,8 +598,10 @@ mod tests {
     #[test]
     fn search_by_kind() {
         let mut mp = Marketplace::new();
-        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0")).unwrap();
-        mp.publish(sample_mcp_pkg("community/weather", "1.0.0")).unwrap();
+        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0"))
+            .unwrap();
+        mp.publish(sample_mcp_pkg("community/weather", "1.0.0"))
+            .unwrap();
 
         let manifest_results = mp.search(&SearchQuery {
             kind: Some("manifest".into()),
@@ -370,8 +619,10 @@ mod tests {
     #[test]
     fn unpublish() {
         let mut mp = Marketplace::new();
-        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0")).unwrap();
-        mp.publish(sample_manifest_pkg("thymos/kv", "0.2.0")).unwrap();
+        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0"))
+            .unwrap();
+        mp.publish(sample_manifest_pkg("thymos/kv", "0.2.0"))
+            .unwrap();
 
         let removed = mp.unpublish("thymos/kv", "0.1.0").unwrap();
         assert_eq!(removed.version, "0.1.0");
@@ -405,9 +656,12 @@ mod tests {
     #[test]
     fn list_shows_latest_only() {
         let mut mp = Marketplace::new();
-        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0")).unwrap();
-        mp.publish(sample_manifest_pkg("thymos/kv", "0.2.0")).unwrap();
-        mp.publish(sample_mcp_pkg("community/weather", "1.0.0")).unwrap();
+        mp.publish(sample_manifest_pkg("thymos/kv", "0.1.0"))
+            .unwrap();
+        mp.publish(sample_manifest_pkg("thymos/kv", "0.2.0"))
+            .unwrap();
+        mp.publish(sample_mcp_pkg("community/weather", "1.0.0"))
+            .unwrap();
 
         let all = mp.list();
         assert_eq!(all.len(), 2);

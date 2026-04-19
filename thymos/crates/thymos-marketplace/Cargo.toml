@@ -12,5 +12,6 @@ serde_json = { workspace = true }
 thiserror  = { workspace = true }
 hex        = { workspace = true }
 blake3     = { workspace = true }
+rusqlite   = { workspace = true }
 
 [dev-dependencies]

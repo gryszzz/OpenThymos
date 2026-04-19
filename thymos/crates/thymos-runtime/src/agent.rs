@@ -187,10 +187,7 @@ pub fn run_agent(
 /// Fetch the Observation from the commit that just landed. The ledger is the
 /// source of truth — we don't trust cached values.
 fn last_observation(run: &Run<'_>, commit_id: thymos_core::CommitId) -> Result<Observation> {
-    let entries: Vec<Entry> = run
-        .runtime()
-        .ledger
-        .entries(run.trajectory_id())?;
+    let entries: Vec<Entry> = run.runtime().ledger.entries(run.trajectory_id())?;
     for e in entries.into_iter().rev() {
         if let EntryPayload::Commit(c) = &e.payload {
             if c.id == commit_id {

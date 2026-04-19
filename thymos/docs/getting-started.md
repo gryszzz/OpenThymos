@@ -22,6 +22,40 @@ cargo run -p thymos-server
 
 Server starts on `http://localhost:3001`.
 
+### Production-shaped local run
+
+```bash
+THYMOS_RUNTIME_MODE=production \
+THYMOS_LEDGER_PATH=thymos-ledger.db \
+THYMOS_DB_PATH=thymos-runs.db \
+THYMOS_GATEWAY_DB_PATH=thymos-gateway.db \
+THYMOS_MARKETPLACE_DB_PATH=thymos-marketplace.db \
+THYMOS_TOOL_FABRIC=worker \
+THYMOS_WORKER_BIN=$PWD/target/release/thymos-worker \
+cargo run -p thymos-server
+```
+
+This enables the non-ephemeral server path:
+
+- file-backed ledger
+- persistent run metadata
+- persistent API key storage
+- persistent marketplace storage
+- worker-backed secure tool fabric
+
+Production mode now refuses to boot unless `THYMOS_TOOL_FABRIC=worker` and
+`THYMOS_WORKER_BIN` are both set.
+
+Build the worker first when using hardened mode:
+
+```bash
+cargo build --release -p thymos-worker
+```
+
+Note: `THYMOS_POSTGRES_URL` is now recognized in config, but the HTTP runtime is
+still wired to the synchronous SQLite ledger path. Full Postgres runtime cutover
+is the next architectural step.
+
 ### With Anthropic
 
 ```bash
@@ -123,9 +157,16 @@ async fn main() -> Result<(), thymos_client::Error> {
 | `ANTHROPIC_API_KEY` | Anthropic API key for Claude models | — |
 | `OPENAI_API_KEY` | OpenAI API key | — |
 | `OPENAI_BASE_URL` | Custom OpenAI-compatible endpoint | `https://api.openai.com/v1` |
+| `THYMOS_RUNTIME_MODE` | `reference` or `production` | `reference` |
+| `THYMOS_LEDGER_PATH` | SQLite ledger path required in production mode | — |
+| `THYMOS_POSTGRES_URL` | Reserved for upcoming Postgres runtime path | — |
 | `THYMOS_JWT_SECRET` | HS256 secret for JWT auth | — (auth disabled) |
 | `THYMOS_API_KEYS` | API gateway keys (see format above) | — (gateway disabled) |
 | `THYMOS_DB_PATH` | SQLite path for run persistence | `thymos-runs.db` |
+| `THYMOS_GATEWAY_DB_PATH` | SQLite path for persisted API keys | `thymos-gateway.db` |
+| `THYMOS_MARKETPLACE_DB_PATH` | SQLite path for persisted marketplace state | `thymos-marketplace.db` |
+| `THYMOS_TOOL_FABRIC` | `in_process` or `worker` for high-risk tool execution | `in_process` |
+| `THYMOS_WORKER_BIN` | Absolute path to the `thymos-worker` binary | — |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry collector endpoint | — (tracing disabled) |
 
 ## Docker

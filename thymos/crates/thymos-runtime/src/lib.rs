@@ -6,14 +6,14 @@
 //! Phase 1 is synchronous and single-agent. The runtime owns a fresh `World`
 //! projection and rebuilds it from the ledger on `Run::resume`.
 
-use thymos_compiler::{compile_with_context, Compiled, CompileContext};
+use thymos_compiler::{compile_with_context, CompileContext, Compiled};
 use thymos_core::{
     commit::{Commit, CommitBody},
     error::{Error, Result},
     intent::Intent,
     proposal::RejectionReason,
-    writ::BudgetCost,
     world::World,
+    writ::BudgetCost,
     CommitId, TrajectoryId, COMPILER_VERSION,
 };
 use thymos_ledger::{project_commits, EntryPayload, Ledger};
@@ -81,7 +81,10 @@ pub enum Step {
     Committed(CommitId),
     Rejected(RejectionReason),
     /// Policy returned RequireApproval; the proposal is reified in the ledger.
-    Suspended { channel: String, reason: String },
+    Suspended {
+        channel: String,
+        reason: String,
+    },
     /// A delegation was executed — child ran to completion.
     Delegated {
         child_trajectory_id: TrajectoryId,
@@ -136,19 +139,12 @@ impl<'a> Run<'a> {
 
     /// Create a new trajectory branched from a specific commit in this
     /// trajectory. The new Run starts with the world state as of that commit.
-    pub fn branch_from(
-        &self,
-        commit_id: CommitId,
-        note: &str,
-    ) -> Result<Run<'_>> {
+    pub fn branch_from(&self, commit_id: CommitId, note: &str) -> Result<Run<'_>> {
         let seed = format!("branch-{}-{}", self.trajectory_id, commit_id);
         let new_traj = TrajectoryId::new_from_seed(seed.as_bytes());
-        self.runtime.ledger.append_branch_root(
-            new_traj,
-            self.trajectory_id,
-            commit_id,
-            note,
-        )?;
+        self.runtime
+            .ledger
+            .append_branch_root(new_traj, self.trajectory_id, commit_id, note)?;
         Ok(Run {
             runtime: self.runtime,
             trajectory_id: new_traj,
@@ -169,11 +165,7 @@ impl<'a> Run<'a> {
     }
 
     /// Submit one Intent. Runs it through the full Triad.
-    pub fn submit(
-        &self,
-        intent: Intent,
-        writ: &thymos_core::writ::Writ,
-    ) -> Result<Step> {
+    pub fn submit(&self, intent: Intent, writ: &thymos_core::writ::Writ) -> Result<Step> {
         #[cfg(feature = "telemetry")]
         let _span = tracing::info_span!(
             "triad.submit",
@@ -198,7 +190,12 @@ impl<'a> Run<'a> {
         let _compile_span = tracing::info_span!("triad.compile").entered();
 
         let compiled = compile_with_context(
-            &intent, writ, &world, &self.runtime.tools, &self.runtime.policy, &ctx,
+            &intent,
+            writ,
+            &world,
+            &self.runtime.tools,
+            &self.runtime.policy,
+            &ctx,
         )?;
 
         #[cfg(feature = "telemetry")]
@@ -206,9 +203,11 @@ impl<'a> Run<'a> {
 
         match compiled {
             Compiled::Rejected(reason) => {
-                self.runtime
-                    .ledger
-                    .append_rejection(self.trajectory_id, intent.id, reason.clone())?;
+                self.runtime.ledger.append_rejection(
+                    self.trajectory_id,
+                    intent.id,
+                    reason.clone(),
+                )?;
                 Ok(Step::Rejected(reason))
             }
             Compiled::Suspended {
@@ -280,7 +279,8 @@ impl<'a> Run<'a> {
                 };
 
                 #[cfg(feature = "telemetry")]
-                let _commit_span = tracing::info_span!("triad.commit", seq = parent_seq + 1).entered();
+                let _commit_span =
+                    tracing::info_span!("triad.commit", seq = parent_seq + 1).entered();
 
                 let commit_body = CommitBody {
                     parent: vec![CommitId(parent_hash)],
@@ -380,12 +380,9 @@ impl<'a> Run<'a> {
             .append_root(child_traj, &format!("delegated: {}", child_task))?;
 
         // Record the delegation edge in the parent trajectory.
-        self.runtime.ledger.append_delegation(
-            self.trajectory_id,
-            child_traj,
-            &child_task,
-            None,
-        )?;
+        self.runtime
+            .ledger
+            .append_delegation(self.trajectory_id, child_traj, &child_task, None)?;
 
         Ok(Step::Delegated {
             child_trajectory_id: child_traj,

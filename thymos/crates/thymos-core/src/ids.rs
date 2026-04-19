@@ -16,7 +16,9 @@ macro_rules! content_id {
 
         impl $name {
             pub const ZERO: Self = $name(ContentHash::ZERO);
-            pub fn inner(&self) -> &ContentHash { &self.0 }
+            pub fn inner(&self) -> &ContentHash {
+                &self.0
+            }
         }
 
         impl fmt::Debug for $name {

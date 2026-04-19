@@ -10,6 +10,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Json},
 };
+use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -29,6 +30,7 @@ pub struct ApiGateway {
     keys: HashMap<String, ApiKey>,
     /// Tracks (key -> (count, window_start)).
     rate_state: Mutex<HashMap<String, (u32, Instant)>>,
+    store: Option<Arc<ApiKeyStore>>,
 }
 
 impl ApiGateway {
@@ -36,20 +38,30 @@ impl ApiGateway {
         ApiGateway {
             keys: HashMap::new(),
             rate_state: Mutex::new(HashMap::new()),
+            store: None,
         }
     }
 
+    pub fn with_store(mut self, store: Arc<ApiKeyStore>) -> Result<Self, String> {
+        for key in store.load_all()? {
+            self.keys.insert(key.key.clone(), key);
+        }
+        self.store = Some(store);
+        Ok(self)
+    }
+
     /// Register an API key.
-    pub fn add_key(&mut self, key: ApiKey) {
+    pub fn add_key(&mut self, key: ApiKey) -> Result<(), String> {
+        if let Some(store) = &self.store {
+            store.upsert(&key)?;
+        }
         self.keys.insert(key.key.clone(), key);
+        Ok(())
     }
 
     /// Validate a key and check rate limits. Returns the key record on success.
     pub fn authenticate(&self, bearer: &str) -> Result<&ApiKey, GatewayError> {
-        let key = self
-            .keys
-            .get(bearer)
-            .ok_or(GatewayError::InvalidKey)?;
+        let key = self.keys.get(bearer).ok_or(GatewayError::InvalidKey)?;
 
         // Rate limit check.
         let mut state = self.rate_state.lock().unwrap();
@@ -111,7 +123,11 @@ impl ApiGateway {
         match state.get(bearer) {
             Some((_count, started)) => {
                 let elapsed = started.elapsed().as_secs();
-                if elapsed >= 60 { 0 } else { 60 - elapsed }
+                if elapsed >= 60 {
+                    0
+                } else {
+                    60 - elapsed
+                }
             }
             None => 0,
         }
@@ -121,6 +137,90 @@ impl ApiGateway {
 impl Default for ApiGateway {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Persistent SQLite store for API keys.
+pub struct ApiKeyStore {
+    conn: Mutex<Connection>,
+}
+
+impl ApiKeyStore {
+    pub fn open(path: &str) -> Result<Self, String> {
+        let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        Self::bootstrap(&conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    pub fn open_in_memory() -> Result<Self, String> {
+        let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
+        Self::bootstrap(&conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    fn bootstrap(conn: &Connection) -> Result<(), String> {
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+
+            CREATE TABLE IF NOT EXISTS api_keys (
+                api_key          TEXT PRIMARY KEY,
+                tenant_id        TEXT NOT NULL DEFAULT '',
+                name             TEXT NOT NULL,
+                rate_limit_rpm   INTEGER NOT NULL,
+                created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_at       INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            "#,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn load_all(&self) -> Result<Vec<ApiKey>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT api_key, tenant_id, name, rate_limit_rpm
+                 FROM api_keys
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ApiKey {
+                    key: row.get(0)?,
+                    tenant_id: row.get(1)?,
+                    name: row.get(2)?,
+                    rate_limit_rpm: row.get::<_, i64>(3)? as u32,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut keys = Vec::new();
+        for row in rows {
+            keys.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(keys)
+    }
+
+    pub fn upsert(&self, key: &ApiKey) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO api_keys (api_key, tenant_id, name, rate_limit_rpm, updated_at)
+             VALUES (?1, ?2, ?3, ?4, unixepoch())
+             ON CONFLICT(api_key) DO UPDATE SET
+                 tenant_id = excluded.tenant_id,
+                 name = excluded.name,
+                 rate_limit_rpm = excluded.rate_limit_rpm,
+                 updated_at = unixepoch()",
+            params![key.key, key.tenant_id, key.name, key.rate_limit_rpm],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 }
 
@@ -208,4 +308,41 @@ pub async fn api_key_middleware(
 pub struct GatewayContext {
     pub tenant_id: String,
     pub key_name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_key_store_roundtrip() {
+        let store = ApiKeyStore::open_in_memory().unwrap();
+        let key = ApiKey {
+            key: "k1".into(),
+            tenant_id: "tenant-a".into(),
+            name: "dev".into(),
+            rate_limit_rpm: 60,
+        };
+        store.upsert(&key).unwrap();
+        let keys = store.load_all().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].tenant_id, "tenant-a");
+    }
+
+    #[test]
+    fn gateway_loads_keys_from_store() {
+        let store = Arc::new(ApiKeyStore::open_in_memory().unwrap());
+        store
+            .upsert(&ApiKey {
+                key: "persisted".into(),
+                tenant_id: "tenant-a".into(),
+                name: "persisted-key".into(),
+                rate_limit_rpm: 60,
+            })
+            .unwrap();
+
+        let gateway = ApiGateway::new().with_store(store).unwrap();
+        let key = gateway.authenticate("persisted").unwrap();
+        assert_eq!(key.name, "persisted-key");
+    }
 }

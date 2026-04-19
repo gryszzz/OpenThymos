@@ -257,8 +257,10 @@ impl Cognition for AnthropicCognition {
 
         // 4. Update usage counters (including cache stats when present).
         if let Some(usage) = resp_json.get("usage") {
-            self.total_input_tokens +=
-                usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            self.total_input_tokens += usage
+                .get("input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             self.total_output_tokens += usage
                 .get("output_tokens")
                 .and_then(|v| v.as_u64())
@@ -367,12 +369,15 @@ impl Cognition for AnthropicCognition {
         let final_answer = match stop_reason {
             "end_turn" | "stop_sequence" if intents.is_empty() => {
                 let txt = text_parts.join("\n");
-                if txt.is_empty() { None } else { Some(txt) }
+                if txt.is_empty() {
+                    None
+                } else {
+                    Some(txt)
+                }
             }
             "max_tokens" if intents.is_empty() => {
                 return Err(Error::Other(
-                    "anthropic stop_reason=max_tokens with no tool_use: response truncated"
-                        .into(),
+                    "anthropic stop_reason=max_tokens with no tool_use: response truncated".into(),
                 ));
             }
             "refusal" => {
@@ -445,9 +450,7 @@ impl AnthropicCognition {
                     .get("error")
                     .and_then(|e| e.get("type"))
                     .and_then(|v| v.as_str());
-                if is_transient_status(status.as_u16(), error_type)
-                    && attempt < self.max_retries
-                {
+                if is_transient_status(status.as_u16(), error_type) && attempt < self.max_retries {
                     std::thread::sleep(Duration::from_millis(backoff_delay_ms(attempt)));
                     attempt += 1;
                     continue;
@@ -617,7 +620,10 @@ fn summarize_world(ctx: &CognitionContext<'_>) -> String {
     let mut lines = Vec::new();
     for (key, state) in &ctx.world.resources {
         let v = serde_json::to_string(&state.value).unwrap_or_else(|_| "<unprintable>".into());
-        lines.push(format!("  {}:{} v{} = {}", key.kind, key.id, state.version, v));
+        lines.push(format!(
+            "  {}:{} v{} = {}",
+            key.kind, key.id, state.version, v
+        ));
     }
     lines.join("\n")
 }

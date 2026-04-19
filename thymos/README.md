@@ -40,6 +40,14 @@ cargo run -p thymos-cli -- run "Set greeting to hello" --provider mock
 docker compose up --build
 ```
 
+```bash
+# Hardened worker-backed tool fabric
+cargo build --release -p thymos-worker
+THYMOS_TOOL_FABRIC=worker \
+THYMOS_WORKER_BIN=$PWD/target/release/thymos-worker \
+cargo run -p thymos-server
+```
+
 See [`docs/getting-started.md`](docs/getting-started.md) for a full tour.
 
 ## Architecture
@@ -67,6 +75,7 @@ See [`docs/architecture.md`](docs/architecture.md).
 | `thymos-ledger`    | Append-only content-addressed store (SQLite; Postgres stub)          |
 | `thymos-policy`    | Policy trait + stock policies                                        |
 | `thymos-tools`     | `ToolContract` trait + stock tools (kv, memory, shell, http, delegate, MCP, manifest) |
+| `thymos-worker`    | Subprocess worker boundary for the secure tool fabric                |
 | `thymos-compiler`  | Intent → Proposal compiler                                           |
 | `thymos-cognition` | LLM adapters (Anthropic, OpenAI, local OpenAI-compat, mock)          |
 | `thymos-runtime`   | Agent loop, world projection, async streaming, approval channel     |
@@ -77,7 +86,9 @@ See [`docs/architecture.md`](docs/architecture.md).
 
 ## Status
 
-Pre-alpha. The IPC Triad, signed Writs, ledger, policy, tool contracts, sync + async agent loops, HTTP server with SSE streaming, JWT + API-gateway auth, and tenant isolation are implemented and tested. See the top-level [README](../README.md#status) for the full checklist.
+Pre-alpha. The IPC Triad, signed Writs, ledger, policy, tool contracts, sync + async agent loops, HTTP server with SSE streaming, JWT + API-gateway auth, tenant isolation, and persistent production-mode server config are implemented and tested. See the top-level [README](../README.md#status) for the full checklist.
+
+Slice 2 is underway: `shell` and `http` now route through a secure tool-fabric seam, the shell emits THYMOS-native receipts, and a worker-backed hardened mode is available through `thymos-worker`. A lightweight GitHub Pages site now lives under `docs/pages` and deploys via `.github/workflows/pages.yml`.
 
 ## Tests
 

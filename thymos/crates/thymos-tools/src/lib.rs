@@ -13,14 +13,15 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use thymos_core::{
     commit::Observation,
     delta::StructuredDelta,
     error::{Error, Result},
-    writ::BudgetCost,
     world::World,
+    writ::BudgetCost,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +59,618 @@ pub struct ToolInvocation<'a> {
 pub struct ToolOutcome {
     pub delta: StructuredDelta,
     pub observation: Observation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionMode {
+    InProcess,
+    Worker,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellCapabilityProfile {
+    Inspect,
+    Build,
+    Mutate,
+    Networked,
+}
+
+impl ShellCapabilityProfile {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "inspect" => Ok(Self::Inspect),
+            "build" => Ok(Self::Build),
+            "mutate" => Ok(Self::Mutate),
+            "networked" => Ok(Self::Networked),
+            other => Err(Error::ToolExecution(format!(
+                "unsupported shell capability profile '{other}'"
+            ))),
+        }
+    }
+
+    fn allowed_commands(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Inspect => Some(&[
+                "ls", "pwd", "cat", "head", "tail", "sed", "awk", "cut", "sort", "uniq", "wc",
+                "rg", "find", "stat", "git", "env", "printenv", "which", "echo", "printf",
+            ]),
+            Self::Build => Some(&[
+                "ls", "pwd", "cat", "head", "tail", "sed", "awk", "cut", "sort", "uniq", "wc",
+                "rg", "find", "stat", "git", "env", "printenv", "which", "echo", "printf",
+                "cargo", "rustc", "rustfmt", "make", "npm", "pnpm", "yarn", "bun", "go",
+                "pytest",
+            ]),
+            Self::Mutate => Some(&[
+                "ls", "pwd", "cat", "head", "tail", "sed", "awk", "cut", "sort", "uniq", "wc",
+                "rg", "find", "stat", "git", "env", "printenv", "which", "echo", "printf",
+                "cargo", "rustc", "rustfmt", "make", "npm", "pnpm", "yarn", "bun", "go",
+                "pytest", "cp", "mv", "mkdir", "touch", "chmod", "rm",
+            ]),
+            Self::Networked => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolWorkerRequest {
+    Shell {
+        command: String,
+        cwd: Option<String>,
+        timeout_secs: u64,
+        purpose: Option<String>,
+        capability_profile: String,
+        restricted_env: bool,
+        env: BTreeMap<String, String>,
+        max_output_bytes: usize,
+        blocked_patterns: Vec<String>,
+        wrapper: Vec<String>,
+        allowed_roots: Vec<String>,
+        isolate_home: bool,
+    },
+    Http {
+        url: String,
+        method: String,
+        body: Option<String>,
+        headers: BTreeMap<String, String>,
+        allowlist: Vec<String>,
+        timeout_secs: u64,
+        block_private_hosts: bool,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolWorkerResponse {
+    pub kind: String,
+    pub output: Value,
+    pub latency_ms: u64,
+}
+
+fn worker_receipt(kind: &str, payload: &Value) -> Value {
+    let canonical = serde_json::to_vec(payload).unwrap_or_default();
+    let receipt = blake3::hash(&canonical).to_hex().to_string();
+    serde_json::json!({
+        "kind": kind,
+        "receipt_id": receipt,
+    })
+}
+
+fn in_process_worker_execute(req: ToolWorkerRequest) -> Result<ToolWorkerResponse> {
+    match req {
+        ToolWorkerRequest::Shell {
+            command,
+            cwd,
+            timeout_secs,
+            purpose,
+            capability_profile,
+            restricted_env,
+            env,
+            max_output_bytes,
+            blocked_patterns,
+            wrapper,
+            allowed_roots,
+            isolate_home,
+        } => execute_shell_request(
+            &command,
+            cwd.as_deref(),
+            timeout_secs,
+            purpose.as_deref(),
+            &capability_profile,
+            restricted_env,
+            &env,
+            max_output_bytes,
+            &blocked_patterns,
+            &wrapper,
+            &allowed_roots,
+            isolate_home,
+        ),
+        ToolWorkerRequest::Http {
+            url,
+            method,
+            body,
+            headers,
+            allowlist,
+            timeout_secs,
+            block_private_hosts,
+        } => execute_http_request(
+            &url,
+            &method,
+            body.as_deref(),
+            &headers,
+            &allowlist,
+            timeout_secs,
+            block_private_hosts,
+        ),
+    }
+}
+
+fn subprocess_worker_execute(
+    worker_bin: &str,
+    req: &ToolWorkerRequest,
+) -> Result<ToolWorkerResponse> {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(worker_bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::ToolExecution(format!("spawn worker failed: {e}")))?;
+
+    let request_bytes =
+        serde_json::to_vec(req).map_err(|e| Error::ToolExecution(format!("worker encode: {e}")))?;
+
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| Error::ToolExecution("worker stdin unavailable".into()))?
+        .write_all(&request_bytes)
+        .map_err(|e| Error::ToolExecution(format!("worker write: {e}")))?;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| Error::ToolExecution(format!("worker wait: {e}")))?;
+
+    if !output.status.success() {
+        return Err(Error::ToolExecution(format!(
+            "worker failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    serde_json::from_slice::<ToolWorkerResponse>(&output.stdout)
+        .map_err(|e| Error::ToolExecution(format!("worker decode: {e}")))
+}
+
+pub fn worker_entrypoint() -> Result<()> {
+    let mut input = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut input)
+        .map_err(|e| Error::ToolExecution(format!("worker stdin read: {e}")))?;
+
+    let request = serde_json::from_slice::<ToolWorkerRequest>(&input)
+        .map_err(|e| Error::ToolExecution(format!("worker request decode: {e}")))?;
+    let response = in_process_worker_execute(request)?;
+    let output = serde_json::to_vec(&response)
+        .map_err(|e| Error::ToolExecution(format!("worker response encode: {e}")))?;
+    std::io::stdout()
+        .write_all(&output)
+        .map_err(|e| Error::ToolExecution(format!("worker stdout write: {e}")))?;
+    Ok(())
+}
+
+fn execute_shell_request(
+    command: &str,
+    cwd: Option<&str>,
+    timeout_secs: u64,
+    purpose: Option<&str>,
+    capability_profile: &str,
+    restricted_env: bool,
+    env: &BTreeMap<String, String>,
+    max_output_bytes: usize,
+    blocked_patterns: &[String],
+    wrapper: &[String],
+    allowed_roots: &[String],
+    isolate_home: bool,
+) -> Result<ToolWorkerResponse> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    validate_shell_command(command, capability_profile, blocked_patterns)?;
+    let profile = ShellCapabilityProfile::parse(capability_profile)?;
+    let exec_cwd = resolve_working_dir(cwd, allowed_roots)?;
+    let isolated_home = if restricted_env && isolate_home {
+        Some(create_isolated_home_dir()?)
+    } else {
+        None
+    };
+
+    let result = (|| -> Result<ToolWorkerResponse> {
+        let start = Instant::now();
+        let mut cmd = if wrapper.is_empty() {
+            let mut c = Command::new("/bin/sh");
+            c.arg("-c").arg(command);
+            c
+        } else {
+            let mut c = Command::new(&wrapper[0]);
+            for arg in &wrapper[1..] {
+                c.arg(arg);
+            }
+            c.arg("/bin/sh").arg("-c").arg(command);
+            c
+        };
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        if let Some(dir) = &exec_cwd {
+            cmd.current_dir(dir);
+        }
+
+        if restricted_env {
+            cmd.env_clear();
+            if let Ok(path) = std::env::var("PATH") {
+                cmd.env("PATH", path);
+            }
+            if let Some(home) = &isolated_home {
+                cmd.env("HOME", home);
+            } else if let Ok(home) = std::env::var("HOME") {
+                cmd.env("HOME", home);
+            }
+        }
+
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| Error::ToolExecution(format!("spawn failed: {e}")))?;
+        let timeout = Duration::from_secs(timeout_secs);
+
+        loop {
+            if let Some(_status) = child
+                .try_wait()
+                .map_err(|e| Error::ToolExecution(format!("wait failed: {e}")))?
+            {
+                break;
+            }
+
+            if start.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::ToolExecution(format!(
+                    "command timed out after {timeout_secs}s"
+                )));
+            }
+
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|e| Error::ToolExecution(format!("collect output failed: {e}")))?;
+        let elapsed = start.elapsed();
+
+        let stdout_bytes = &output.stdout[..output.stdout.len().min(max_output_bytes)];
+        let stderr_bytes = &output.stderr[..output
+            .stderr
+            .len()
+            .min(max_output_bytes.saturating_sub(stdout_bytes.len()))];
+        let stdout = String::from_utf8_lossy(stdout_bytes).to_string();
+        let stderr = String::from_utf8_lossy(stderr_bytes).to_string();
+        let exit_code = output.status.code().unwrap_or(-1);
+        let truncated = output.stdout.len() + output.stderr.len() > max_output_bytes;
+
+        let receipt_payload = serde_json::json!({
+            "worker_boundary": "subprocess_contract",
+            "runtime": "thymos_secure_shell",
+            "purpose": purpose,
+            "capability_profile": capability_profile,
+            "cwd": exec_cwd.as_ref().map(|p| p.display().to_string()),
+            "restricted_env": restricted_env,
+            "isolated_home": isolated_home.as_ref().map(|p| p.display().to_string()),
+            "allowed_roots": allowed_roots,
+            "command_digest": blake3::hash(command.as_bytes()).to_hex().to_string(),
+            "profile": format!("{profile:?}").to_lowercase(),
+        });
+        let mut receipt = worker_receipt("shell", &receipt_payload);
+        if let Some(obj) = receipt.as_object_mut() {
+            obj.extend(receipt_payload.as_object().cloned().unwrap_or_default());
+        }
+
+        Ok(ToolWorkerResponse {
+            kind: "shell".into(),
+            output: serde_json::json!({
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code,
+                "truncated": truncated,
+                "receipt": receipt,
+            }),
+            latency_ms: elapsed.as_millis() as u64,
+        })
+    })();
+
+    if let Some(home) = isolated_home {
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    result
+}
+
+fn execute_http_request(
+    url: &str,
+    method: &str,
+    body: Option<&str>,
+    headers: &BTreeMap<String, String>,
+    allowlist: &[String],
+    timeout_secs: u64,
+    block_private_hosts: bool,
+) -> Result<ToolWorkerResponse> {
+    use std::time::Instant;
+
+    if block_private_hosts {
+        reject_private_host(url)?;
+    }
+
+    if !allowlist.is_empty() {
+        let host = url
+            .split("://")
+            .nth(1)
+            .and_then(|s| s.split('/').next())
+            .and_then(|s| s.split(':').next())
+            .unwrap_or("");
+        let allowed = allowlist
+            .iter()
+            .any(|d| host == d.as_str() || host.ends_with(&format!(".{d}")));
+        if !allowed {
+            return Err(Error::PreconditionFailed(format!(
+                "domain '{}' not in allowlist: {:?}",
+                host, allowlist
+            )));
+        }
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| Error::ToolExecution(format!("http client: {e}")))?;
+
+    let start = Instant::now();
+    let mut req = match method {
+        "POST" => client.post(url),
+        _ => client.get(url),
+    };
+
+    if let Some(body) = body {
+        req = req.body(body.to_string());
+    }
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+
+    let resp = req
+        .send()
+        .map_err(|e| Error::ToolExecution(format!("http request failed: {e}")))?;
+    let elapsed = start.elapsed();
+    let status = resp.status().as_u16();
+    let body = resp.text().unwrap_or_default();
+    let body_truncated = if body.len() > 10_000 {
+        format!(
+            "{}... (truncated, {} bytes total)",
+            &body[..10_000],
+            body.len()
+        )
+    } else {
+        body
+    };
+
+    let receipt_payload = serde_json::json!({
+        "worker_boundary": "subprocess_contract",
+        "runtime": "thymos_secure_http",
+        "method": method,
+        "url_digest": blake3::hash(url.as_bytes()).to_hex().to_string(),
+    });
+    let mut receipt = worker_receipt("http", &receipt_payload);
+    if let Some(obj) = receipt.as_object_mut() {
+        obj.extend(receipt_payload.as_object().cloned().unwrap_or_default());
+    }
+
+    Ok(ToolWorkerResponse {
+        kind: "http".into(),
+        output: serde_json::json!({
+            "status": status,
+            "body": body_truncated,
+            "receipt": receipt,
+        }),
+        latency_ms: elapsed.as_millis() as u64,
+    })
+}
+
+fn validate_shell_command(
+    command: &str,
+    capability_profile: &str,
+    blocked_patterns: &[String],
+) -> Result<()> {
+    const FORBIDDEN_SEQUENCES: [&str; 6] = ["&&", "||", ";", "\n", "\r", "$("];
+
+    if command.trim().is_empty() {
+        return Err(Error::ToolExecution("empty shell command".into()));
+    }
+
+    if command.len() > 2048 {
+        return Err(Error::ToolExecution(
+            "shell command exceeds 2048-byte hardened limit".into(),
+        ));
+    }
+
+    for pattern in blocked_patterns {
+        if command.contains(pattern.as_str()) {
+            return Err(Error::ToolExecution(format!(
+                "command blocked by sandbox policy: contains '{pattern}'"
+            )));
+        }
+    }
+
+    for pattern in FORBIDDEN_SEQUENCES {
+        if command.contains(pattern) {
+            return Err(Error::ToolExecution(format!(
+                "shell command uses forbidden sequence '{pattern}'"
+            )));
+        }
+    }
+
+    if command.contains('`') {
+        return Err(Error::ToolExecution(
+            "shell command uses forbidden backtick substitution".into(),
+        ));
+    }
+
+    let profile = ShellCapabilityProfile::parse(capability_profile)?;
+    if let Some(allowlist) = profile.allowed_commands() {
+        for stage in command.split('|') {
+            let stage = stage.trim();
+            if stage.is_empty() {
+                return Err(Error::ToolExecution(
+                    "shell pipeline contains an empty stage".into(),
+                ));
+            }
+            let cmd_name = stage
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| Error::ToolExecution("invalid shell stage".into()))?;
+            if !allowlist.contains(&cmd_name) {
+                return Err(Error::ToolExecution(format!(
+                    "command '{cmd_name}' is not allowed in {capability_profile} profile"
+                )));
+            }
+        }
+    }
+
+    if profile != ShellCapabilityProfile::Networked {
+        for stage in command.split('|') {
+            let cmd_name = stage.split_whitespace().next().unwrap_or_default();
+            if matches!(
+                cmd_name,
+                "curl"
+                    | "wget"
+                    | "ssh"
+                    | "scp"
+                    | "telnet"
+                    | "nc"
+                    | "ncat"
+                    | "ping"
+                    | "dig"
+                    | "nslookup"
+            ) {
+                return Err(Error::ToolExecution(format!(
+                    "network command '{cmd_name}' requires the networked profile"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_working_dir(cwd: Option<&str>, allowed_roots: &[String]) -> Result<Option<PathBuf>> {
+    let requested = if let Some(cwd) = cwd {
+        Some(PathBuf::from(cwd))
+    } else if let Some(root) = allowed_roots.first() {
+        Some(PathBuf::from(root))
+    } else {
+        None
+    };
+
+    let Some(requested) = requested else {
+        return Ok(None);
+    };
+
+    let canonical_requested = requested.canonicalize().map_err(|e| {
+        Error::ToolExecution(format!(
+            "working directory '{}' is invalid: {e}",
+            requested.display()
+        ))
+    })?;
+
+    if allowed_roots.is_empty() {
+        return Ok(Some(canonical_requested));
+    }
+
+    let mut allowed = false;
+    for root in allowed_roots {
+        let canonical_root = PathBuf::from(root).canonicalize().map_err(|e| {
+            Error::ToolExecution(format!("allowed root '{}' is invalid: {e}", root))
+        })?;
+        if canonical_requested.starts_with(&canonical_root) {
+            allowed = true;
+            break;
+        }
+    }
+
+    if !allowed {
+        return Err(Error::ToolExecution(format!(
+            "working directory '{}' escapes allowed roots",
+            canonical_requested.display()
+        )));
+    }
+
+    Ok(Some(canonical_requested))
+}
+
+fn create_isolated_home_dir() -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!(
+        "thymos-home-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| Error::ToolExecution(format!("create isolated HOME failed: {e}")))?;
+    Ok(dir)
+}
+
+fn reject_private_host(url: &str) -> Result<()> {
+    use std::net::IpAddr;
+
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| Error::ToolExecution(format!("invalid url '{url}': {e}")))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| Error::ToolExecution(format!("url '{url}' is missing a host")))?;
+
+    if matches!(host, "localhost" | "127.0.0.1" | "::1")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+    {
+        return Err(Error::PreconditionFailed(format!(
+            "private or loopback host '{host}' is blocked"
+        )));
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let blocked = match ip {
+            IpAddr::V4(v4) => {
+                v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_broadcast()
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local()
+            }
+        };
+        if blocked {
+            return Err(Error::PreconditionFailed(format!(
+                "private or loopback host '{host}' is blocked"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 pub trait ToolContract: Send + Sync {
@@ -383,12 +996,13 @@ impl ToolContract for KvSetTool {
             tool: "kv_set".into(),
             detail: "args must be an object".into(),
         })?;
-        let _key = obj.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
-            Error::ToolTypeMismatch {
-                tool: "kv_set".into(),
-                detail: "missing string 'key'".into(),
-            }
-        })?;
+        let _key =
+            obj.get("key")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::ToolTypeMismatch {
+                    tool: "kv_set".into(),
+                    detail: "missing string 'key'".into(),
+                })?;
         if !obj.contains_key("value") {
             return Err(Error::ToolTypeMismatch {
                 tool: "kv_set".into(),
@@ -556,12 +1170,12 @@ impl ToolContract for MemoryStoreTool {
             tool: "memory_store".into(),
             detail: "args must be an object".into(),
         })?;
-        obj.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
-            Error::ToolTypeMismatch {
+        obj.get("key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::ToolTypeMismatch {
                 tool: "memory_store".into(),
                 detail: "missing string 'key'".into(),
-            }
-        })?;
+            })?;
         obj.get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::ToolTypeMismatch {
@@ -577,7 +1191,11 @@ impl ToolContract for MemoryStoreTool {
 
         let key = inv.args["key"].as_str().unwrap().to_string();
         let content = inv.args["content"].as_str().unwrap().to_string();
-        let source_commits = inv.args.get("source_commits").cloned().unwrap_or(serde_json::json!([]));
+        let source_commits = inv
+            .args
+            .get("source_commits")
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
 
         let value = serde_json::json!({
             "content": content,
@@ -764,6 +1382,12 @@ pub struct SandboxConfig {
     pub wrapper: Vec<String>,
     /// Blocked command patterns (substring match). Prevents dangerous commands.
     pub blocked_patterns: Vec<String>,
+    /// Optional worker binary used for subprocess isolation.
+    pub worker_bin: Option<String>,
+    /// Allowed directory roots for command execution.
+    pub allowed_roots: Vec<String>,
+    /// If true, restricted environments receive an isolated temporary HOME.
+    pub isolate_home: bool,
 }
 
 impl Default for SandboxConfig {
@@ -780,6 +1404,12 @@ impl Default for SandboxConfig {
                 "dd if=".into(),
                 ":(){".into(), // fork bomb
             ],
+            worker_bin: std::env::var("THYMOS_WORKER_BIN").ok(),
+            allowed_roots: std::env::current_dir()
+                .ok()
+                .map(|p| vec![p.display().to_string()])
+                .unwrap_or_default(),
+            isolate_home: true,
         }
     }
 }
@@ -793,6 +1423,8 @@ pub struct ShellTool {
     pub timeout_secs: u64,
     /// Sandbox configuration for process isolation.
     pub sandbox: SandboxConfig,
+    /// Execution mode for the secure tool fabric.
+    pub execution_mode: ToolExecutionMode,
 }
 
 impl Default for ShellTool {
@@ -806,6 +1438,10 @@ impl Default for ShellTool {
             },
             timeout_secs: 30,
             sandbox: SandboxConfig::default(),
+            execution_mode: match std::env::var("THYMOS_TOOL_FABRIC").ok().as_deref() {
+                Some("worker") => ToolExecutionMode::Worker,
+                _ => ToolExecutionMode::InProcess,
+            },
         }
     }
 }
@@ -813,6 +1449,11 @@ impl Default for ShellTool {
 impl ShellTool {
     pub fn with_sandbox(mut self, sandbox: SandboxConfig) -> Self {
         self.sandbox = sandbox;
+        self
+    }
+
+    pub fn with_execution_mode(mut self, mode: ToolExecutionMode) -> Self {
+        self.execution_mode = mode;
         self
     }
 }
@@ -823,9 +1464,11 @@ impl ToolContract for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command (via /bin/sh -c). Returns stdout, stderr, and \
-         exit code. Commands are killed after a timeout. Use this for system \
-         operations — file manipulation, builds, git commands, etc."
+        "Execute a command through the THYMOS secure shell. This shell is \
+         receipt-bearing and capability-aware: provide a clear purpose, keep \
+         commands bounded, and prefer inspect/build/mutate style work over \
+         arbitrary interactive scripting. Returns stdout, stderr, exit code, \
+         and an execution receipt."
     }
 
     fn input_schema(&self) -> Value {
@@ -833,6 +1476,20 @@ impl ToolContract for ShellTool {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "Shell command to execute" },
+                "purpose": {
+                    "type": "string",
+                    "description": "Why this command is needed for the current run"
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Optional working directory override for this execution"
+                },
+                "capability_profile": {
+                    "type": "string",
+                    "enum": ["inspect", "build", "mutate", "networked"],
+                    "default": "inspect",
+                    "description": "Declared execution profile used in the receipt"
+                },
                 "timeout_secs": {
                     "type": "integer",
                     "description": "Override timeout in seconds (default: 30)"
@@ -862,9 +1519,6 @@ impl ToolContract for ShellTool {
     }
 
     fn execute(&self, inv: &ToolInvocation<'_>) -> Result<ToolOutcome> {
-        use std::process::Command;
-        use std::time::{Duration, Instant};
-
         let command = inv.args["command"].as_str().unwrap();
         let timeout = inv
             .args
@@ -872,81 +1526,53 @@ impl ToolContract for ShellTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(self.timeout_secs);
 
-        // Check blocked patterns.
-        for pattern in &self.sandbox.blocked_patterns {
-            if command.contains(pattern.as_str()) {
-                return Err(Error::ToolExecution(format!(
-                    "command blocked by sandbox policy: contains '{pattern}'"
-                )));
-            }
-        }
+        let capability_profile = inv
+            .args
+            .get("capability_profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("inspect");
+        let purpose = inv.args.get("purpose").and_then(|v| v.as_str());
+        let cwd = inv
+            .args
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| self.sandbox.working_dir.clone());
 
-        // Build the subprocess.
-        let start = Instant::now();
-        let mut cmd = if self.sandbox.wrapper.is_empty() {
-            let mut c = Command::new("/bin/sh");
-            c.arg("-c").arg(command);
-            c
-        } else {
-            let mut c = Command::new(&self.sandbox.wrapper[0]);
-            for arg in &self.sandbox.wrapper[1..] {
-                c.arg(arg);
-            }
-            c.arg("/bin/sh").arg("-c").arg(command);
-            c
+        let request = ToolWorkerRequest::Shell {
+            command: command.to_string(),
+            cwd,
+            timeout_secs: timeout,
+            purpose: purpose.map(|s| s.to_string()),
+            capability_profile: capability_profile.to_string(),
+            restricted_env: self.sandbox.restricted_env,
+            env: self.sandbox.env_overrides.clone(),
+            max_output_bytes: self.sandbox.max_output_bytes,
+            blocked_patterns: self.sandbox.blocked_patterns.clone(),
+            wrapper: self.sandbox.wrapper.clone(),
+            allowed_roots: self.sandbox.allowed_roots.clone(),
+            isolate_home: self.sandbox.isolate_home,
         };
 
-        // Working directory.
-        if let Some(dir) = &self.sandbox.working_dir {
-            cmd.current_dir(dir);
-        }
-
-        // Restricted environment.
-        if self.sandbox.restricted_env {
-            cmd.env_clear();
-            if let Ok(path) = std::env::var("PATH") {
-                cmd.env("PATH", path);
+        let response = match self.execution_mode {
+            ToolExecutionMode::InProcess => in_process_worker_execute(request)?,
+            ToolExecutionMode::Worker => {
+                let worker_bin = self.sandbox.worker_bin.as_deref().ok_or_else(|| {
+                    Error::ToolExecution(
+                        "worker execution mode requires THYMOS_WORKER_BIN or sandbox.worker_bin"
+                            .into(),
+                    )
+                })?;
+                subprocess_worker_execute(worker_bin, &request)?
             }
-            if let Ok(home) = std::env::var("HOME") {
-                cmd.env("HOME", home);
-            }
-        }
-
-        // Apply env overrides.
-        for (k, v) in &self.sandbox.env_overrides {
-            cmd.env(k, v);
-        }
-
-        let output = cmd
-            .output()
-            .map_err(|e| Error::ToolExecution(format!("spawn failed: {e}")))?;
-
-        let elapsed = start.elapsed();
-        if elapsed > Duration::from_secs(timeout) {
-            return Err(Error::ToolExecution("command timed out".into()));
-        }
-
-        // Truncate output to max_output_bytes.
-        let max = self.sandbox.max_output_bytes;
-        let stdout_bytes = &output.stdout[..output.stdout.len().min(max)];
-        let stderr_bytes =
-            &output.stderr[..output.stderr.len().min(max.saturating_sub(stdout_bytes.len()))];
-        let stdout = String::from_utf8_lossy(stdout_bytes).to_string();
-        let stderr = String::from_utf8_lossy(stderr_bytes).to_string();
-        let exit_code = output.status.code().unwrap_or(-1);
-        let truncated = output.stdout.len() + output.stderr.len() > max;
+        };
 
         Ok(ToolOutcome {
             delta: StructuredDelta::default(),
             observation: Observation {
                 tool: "shell".into(),
-                output: serde_json::json!({
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "exit_code": exit_code,
-                    "truncated": truncated,
-                }),
-                latency_ms: elapsed.as_millis() as u64,
+                output: response.output,
+                latency_ms: response.latency_ms,
             },
         })
     }
@@ -961,6 +1587,12 @@ pub struct HttpTool {
     meta: ToolContractMeta,
     /// If non-empty, only these domain suffixes are allowed.
     pub domain_allowlist: Vec<String>,
+    /// Execution mode for the secure tool fabric.
+    pub execution_mode: ToolExecutionMode,
+    /// Timeout for outbound requests.
+    pub timeout_secs: u64,
+    /// If true, block loopback/private/internal targets before request dispatch.
+    pub block_private_hosts: bool,
 }
 
 impl Default for HttpTool {
@@ -973,6 +1605,12 @@ impl Default for HttpTool {
                 risk_class: RiskClass::Medium,
             },
             domain_allowlist: vec![],
+            execution_mode: match std::env::var("THYMOS_TOOL_FABRIC").ok().as_deref() {
+                Some("worker") => ToolExecutionMode::Worker,
+                _ => ToolExecutionMode::InProcess,
+            },
+            timeout_secs: 30,
+            block_private_hosts: true,
         }
     }
 }
@@ -980,6 +1618,11 @@ impl Default for HttpTool {
 impl HttpTool {
     pub fn with_allowlist(mut self, domains: Vec<String>) -> Self {
         self.domain_allowlist = domains;
+        self
+    }
+
+    pub fn with_execution_mode(mut self, mode: ToolExecutionMode) -> Self {
+        self.execution_mode = mode;
         self
     }
 }
@@ -990,9 +1633,9 @@ impl ToolContract for HttpTool {
     }
 
     fn description(&self) -> &str {
-        "Make an HTTP request. Supports GET and POST methods. Returns status \
-         code, headers, and body. An optional domain allowlist restricts which \
-         hosts may be contacted."
+        "Make an HTTP request through the THYMOS secure tool fabric. Supports \
+         GET and POST, returns response data plus a worker receipt, and can be \
+         pinned to an allowlist for controlled network access."
     }
 
     fn input_schema(&self) -> Value {
@@ -1047,63 +1690,53 @@ impl ToolContract for HttpTool {
     }
 
     fn execute(&self, inv: &ToolInvocation<'_>) -> Result<ToolOutcome> {
-        use std::time::Instant;
-
         let url = inv.args["url"].as_str().unwrap();
         let method = inv
             .args
             .get("method")
             .and_then(|v| v.as_str())
             .unwrap_or("GET");
-
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| Error::ToolExecution(format!("http client: {e}")))?;
-
-        let start = Instant::now();
-        let mut req = match method {
-            "POST" => client.post(url),
-            _ => client.get(url),
-        };
-
-        if let Some(body) = inv.args.get("body").and_then(|v| v.as_str()) {
-            req = req.body(body.to_string());
-        }
-        if let Some(headers) = inv.args.get("headers").and_then(|v| v.as_object()) {
-            for (k, v) in headers {
-                if let Some(v_str) = v.as_str() {
-                    req = req.header(k.as_str(), v_str);
-                }
-            }
-        }
-
-        let resp = req
-            .send()
-            .map_err(|e| Error::ToolExecution(format!("http request failed: {e}")))?;
-        let elapsed = start.elapsed();
-
-        let status = resp.status().as_u16();
-        let body = resp
-            .text()
+        let body = inv
+            .args
+            .get("body")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let headers = inv
+            .args
+            .get("headers")
+            .and_then(|v| v.as_object())
+            .map(|headers| {
+                headers
+                    .iter()
+                    .filter_map(|(k, v)| v.as_str().map(|v_str| (k.clone(), v_str.to_string())))
+                    .collect::<BTreeMap<_, _>>()
+            })
             .unwrap_or_default();
-
-        // Truncate large bodies.
-        let body_truncated = if body.len() > 10_000 {
-            format!("{}... (truncated, {} bytes total)", &body[..10_000], body.len())
-        } else {
-            body
+        let request = ToolWorkerRequest::Http {
+            url: url.to_string(),
+            method: method.to_string(),
+            body,
+            headers,
+            allowlist: self.domain_allowlist.clone(),
+            timeout_secs: self.timeout_secs,
+            block_private_hosts: self.block_private_hosts,
+        };
+        let response = match self.execution_mode {
+            ToolExecutionMode::InProcess => in_process_worker_execute(request)?,
+            ToolExecutionMode::Worker => {
+                let worker_bin = std::env::var("THYMOS_WORKER_BIN").map_err(|_| {
+                    Error::ToolExecution("worker execution mode requires THYMOS_WORKER_BIN".into())
+                })?;
+                subprocess_worker_execute(&worker_bin, &request)?
+            }
         };
 
         Ok(ToolOutcome {
             delta: StructuredDelta::default(),
             observation: Observation {
                 tool: "http".into(),
-                output: serde_json::json!({
-                    "status": status,
-                    "body": body_truncated,
-                }),
-                latency_ms: elapsed.as_millis() as u64,
+                output: response.output,
+                latency_ms: response.latency_ms,
             },
         })
     }
@@ -1294,9 +1927,7 @@ impl ToolContract for ManifestTool {
 
                 if let Some(bt) = body_template {
                     let body = interpolate(bt, inv.args, identity_escape);
-                    req = req
-                        .header("content-type", "application/json")
-                        .body(body);
+                    req = req.header("content-type", "application/json").body(body);
                 }
 
                 let resp = req
@@ -1307,11 +1938,7 @@ impl ToolContract for ManifestTool {
                 let body = resp.text().unwrap_or_default();
 
                 let body_truncated = if body.len() > 10_000 {
-                    format!(
-                        "{}... (truncated, {} bytes)",
-                        &body[..10_000],
-                        body.len()
-                    )
+                    format!("{}... (truncated, {} bytes)", &body[..10_000], body.len())
                 } else {
                     body
                 };
@@ -1362,7 +1989,7 @@ pub struct McpBridge {
     server_name: String,
 }
 
-use std::io::{BufRead, Write as IoWrite};
+use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 
 /// A single tool descriptor returned from `tools/list`.
@@ -1401,11 +2028,14 @@ impl McpBridge {
         });
 
         // Send initialize request.
-        let _init_resp = bridge.call_method("initialize", serde_json::json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "thymos", "version": "0.0.1" }
-        }))?;
+        let _init_resp = bridge.call_method(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "thymos", "version": "0.0.1" }
+            }),
+        )?;
 
         // Send initialized notification (no response expected — but some
         // servers ignore it and some require it).
@@ -1415,10 +2045,7 @@ impl McpBridge {
     }
 
     /// Discover all tools from the MCP server and return one McpBridgeTool per tool.
-    pub fn spawn_all(
-        server_name: &str,
-        command: &[&str],
-    ) -> Result<Vec<McpBridgeTool>> {
+    pub fn spawn_all(server_name: &str, command: &[&str]) -> Result<Vec<McpBridgeTool>> {
         let bridge = Self::spawn(server_name, command)?;
         let tools_resp = bridge.call_method("tools/list", serde_json::json!({}))?;
 
@@ -1495,10 +2122,12 @@ impl McpBridge {
 
         {
             let mut stdin = self.child_stdin.lock().unwrap();
-            writeln!(stdin, "{serialized}")
-                .map_err(|e| Error::ToolExecution(format!("MCP write {}: {e}", self.server_name)))?;
-            stdin.flush()
-                .map_err(|e| Error::ToolExecution(format!("MCP flush {}: {e}", self.server_name)))?;
+            writeln!(stdin, "{serialized}").map_err(|e| {
+                Error::ToolExecution(format!("MCP write {}: {e}", self.server_name))
+            })?;
+            stdin.flush().map_err(|e| {
+                Error::ToolExecution(format!("MCP flush {}: {e}", self.server_name))
+            })?;
         }
 
         // Read response lines until we get one with a matching id.
@@ -1621,16 +2250,52 @@ impl ToolRegistry {
 
     /// Spawn an MCP server and register all tools it exposes.
     /// Tool names are prefixed: `mcp_{server_name}_{tool_name}`.
-    pub fn register_mcp_server(
-        &mut self,
-        server_name: &str,
-        command: &[&str],
-    ) -> Result<usize> {
+    pub fn register_mcp_server(&mut self, server_name: &str, command: &[&str]) -> Result<usize> {
         let tools = McpBridge::spawn_all(server_name, command)?;
         let count = tools.len();
         for tool in tools {
             self.tools.insert(tool.meta().name.clone(), Box::new(tool));
         }
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod secure_tool_fabric_tests {
+    use super::*;
+
+    #[test]
+    fn shell_rejects_forbidden_sequence() {
+        let err = validate_shell_command("ls && pwd", "inspect", &[]).unwrap_err();
+        assert!(err.to_string().contains("forbidden sequence"));
+    }
+
+    #[test]
+    fn shell_rejects_command_outside_profile() {
+        let err = validate_shell_command("curl https://example.com", "inspect", &[]).unwrap_err();
+        assert!(err.to_string().contains("not allowed"));
+    }
+
+    #[test]
+    fn resolve_working_dir_rejects_escape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let allowed = vec![temp.path().display().to_string()];
+        let err = resolve_working_dir(Some("/tmp"), &allowed).unwrap_err();
+        assert!(err.to_string().contains("escapes allowed roots"));
+    }
+
+    #[test]
+    fn http_rejects_private_host() {
+        let err = execute_http_request(
+            "http://127.0.0.1:3001",
+            "GET",
+            None,
+            &BTreeMap::new(),
+            &[],
+            5,
+            true,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("private or loopback host"));
     }
 }

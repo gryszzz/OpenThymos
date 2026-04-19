@@ -64,7 +64,10 @@ impl<C: Cognition> ContextManager<C> {
     /// Estimate token count for a history item (rough heuristic: chars / 4).
     fn estimate_tokens(item: &HistoryItem) -> usize {
         match item {
-            HistoryItem::Committed { intent, observation } => {
+            HistoryItem::Committed {
+                intent,
+                observation,
+            } => {
                 let intent_size = intent.body.target.len()
                     + serde_json::to_string(&intent.body.args)
                         .map(|s| s.len())
@@ -92,10 +95,7 @@ impl<C: Cognition> ContextManager<C> {
             return String::new();
         }
 
-        let mut summary = format!(
-            "[Summary of {} earlier actions]\n",
-            items.len()
-        );
+        let mut summary = format!("[Summary of {} earlier actions]\n", items.len());
 
         let mut commits = 0;
         let mut rejections = 0;
@@ -129,10 +129,7 @@ impl<C: Cognition> ContextManager<C> {
         for item in items.iter().rev().take(tail_count).rev() {
             match item {
                 HistoryItem::Committed { intent, .. } => {
-                    summary.push_str(&format!(
-                        "  - {} -> committed\n",
-                        intent.body.target
-                    ));
+                    summary.push_str(&format!("  - {} -> committed\n", intent.body.target));
                 }
                 HistoryItem::Rejected { intent, reason } => {
                     summary.push_str(&format!(
@@ -148,11 +145,7 @@ impl<C: Cognition> ContextManager<C> {
 
     /// Apply the sliding window: keep recent items, summarize the rest.
     fn apply_window(&mut self) {
-        let total_tokens: usize = self
-            .all_history
-            .iter()
-            .map(Self::estimate_tokens)
-            .sum();
+        let total_tokens: usize = self.all_history.iter().map(Self::estimate_tokens).sum();
 
         let needs_trim = self.all_history.len() > self.config.max_history_items
             || total_tokens > self.config.max_estimated_tokens;
@@ -238,9 +231,7 @@ mod tests {
 
     #[test]
     fn summarize_history_produces_compact_output() {
-        let items: Vec<HistoryItem> = (0..10)
-            .map(|i| make_committed_item("kv_set", i))
-            .collect();
+        let items: Vec<HistoryItem> = (0..10).map(|i| make_committed_item("kv_set", i)).collect();
         let summary = ContextManager::<MockCognition>::summarize_history(&items);
         assert!(summary.contains("10 earlier actions"));
         assert!(summary.contains("10 committed"));
@@ -265,7 +256,11 @@ mod tests {
 
         assert_eq!(mgr.all_history.len(), 5);
         assert!(mgr.summary_prefix.is_some());
-        assert!(mgr.summary_prefix.as_ref().unwrap().contains("5 earlier actions"));
+        assert!(mgr
+            .summary_prefix
+            .as_ref()
+            .unwrap()
+            .contains("5 earlier actions"));
     }
 
     #[test]

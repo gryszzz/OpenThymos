@@ -1,0 +1,8 @@
+title: Thymos
+description: Governed execution substrate for code agents
+theme: minima
+markdown: kramdown
+plugins:
+  - jekyll-seo-tag
+minima:
+  social_links: []

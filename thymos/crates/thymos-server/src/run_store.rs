@@ -106,8 +106,8 @@ impl RunStore {
                     _ => RunStatus::Failed,
                 };
 
-                let summary: Option<RunSummaryDto> = summary_json
-                    .and_then(|s| serde_json::from_str(&s).ok());
+                let summary: Option<RunSummaryDto> =
+                    summary_json.and_then(|s| serde_json::from_str(&s).ok());
 
                 Ok((
                     run_id,
@@ -166,7 +166,12 @@ impl RunStore {
     }
 
     /// List runs with pagination, optionally filtered by tenant.
-    pub fn list(&self, limit: u32, offset: u32, tenant_id: Option<&str>) -> Result<Vec<(String, RunRecord)>, String> {
+    pub fn list(
+        &self,
+        limit: u32,
+        offset: u32,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<(String, RunRecord)>, String> {
         let conn = self.conn.lock().unwrap();
         let (sql, use_tenant) = if let Some(_) = tenant_id {
             (
@@ -182,8 +187,11 @@ impl RunStore {
         let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
 
         let rows = if use_tenant {
-            stmt.query_map(params![limit, offset, tenant_id.unwrap()], row_to_run_record)
-                .map_err(|e| e.to_string())?
+            stmt.query_map(
+                params![limit, offset, tenant_id.unwrap()],
+                row_to_run_record,
+            )
+            .map_err(|e| e.to_string())?
         } else {
             stmt.query_map(params![limit, offset], row_to_run_record)
                 .map_err(|e| e.to_string())?

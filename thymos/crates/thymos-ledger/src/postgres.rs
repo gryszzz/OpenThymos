@@ -10,13 +10,15 @@ use deadpool_postgres::{Config, Pool, Runtime};
 use tokio_postgres::NoTls;
 
 use thymos_core::{
-    canonical_json_bytes, content_hash, CommitId, ContentHash, Error, Result, TrajectoryId,
+    canonical_json_bytes,
     commit::Commit,
-    proposal::{Proposal, RejectionReason},
+    content_hash,
     ids::IntentId,
+    proposal::{Proposal, RejectionReason},
+    CommitId, ContentHash, Error, Result, TrajectoryId,
 };
 
-use crate::{Entry, EntryKind, EntryPayload, build_entry};
+use crate::{build_entry, Entry, EntryKind, EntryPayload};
 
 pub struct PostgresLedger {
     pool: Pool,
@@ -38,7 +40,11 @@ impl PostgresLedger {
     }
 
     async fn bootstrap(&self) -> Result<()> {
-        let client = self.pool.get().await.map_err(|e| Error::Ledger(e.to_string()))?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| Error::Ledger(e.to_string()))?;
         client
             .batch_execute(
                 r#"
@@ -84,7 +90,11 @@ impl PostgresLedger {
         let expected_parent = match &commit.body.parent[..] {
             [single] => Some(single.0),
             [] => None,
-            _ => return Err(Error::Invariant("multi-parent commits not supported".into())),
+            _ => {
+                return Err(Error::Invariant(
+                    "multi-parent commits not supported".into(),
+                ))
+            }
         };
         if expected_parent != Some(parent_id) && expected_parent.is_some() {
             return Err(Error::Invariant(format!(
@@ -122,7 +132,13 @@ impl PostgresLedger {
     ) -> Result<Entry> {
         let (parent_id, parent_seq) = self.current_head(trajectory_id).await?;
         let payload = EntryPayload::Rejection { intent_id, reason };
-        let entry = build_entry(trajectory_id, Some(parent_id), parent_seq + 1, EntryKind::Rejection, payload)?;
+        let entry = build_entry(
+            trajectory_id,
+            Some(parent_id),
+            parent_seq + 1,
+            EntryKind::Rejection,
+            payload,
+        )?;
         self.insert_entry(&entry, true).await?;
         Ok(entry)
     }
@@ -135,8 +151,18 @@ impl PostgresLedger {
         reason: String,
     ) -> Result<Entry> {
         let (parent_id, parent_seq) = self.current_head(trajectory_id).await?;
-        let payload = EntryPayload::PendingApproval { proposal, channel, reason };
-        let entry = build_entry(trajectory_id, Some(parent_id), parent_seq + 1, EntryKind::PendingApproval, payload)?;
+        let payload = EntryPayload::PendingApproval {
+            proposal,
+            channel,
+            reason,
+        };
+        let entry = build_entry(
+            trajectory_id,
+            Some(parent_id),
+            parent_seq + 1,
+            EntryKind::PendingApproval,
+            payload,
+        )?;
         self.insert_entry(&entry, true).await?;
         Ok(entry)
     }
@@ -154,7 +180,13 @@ impl PostgresLedger {
             task: task.to_string(),
             final_answer,
         };
-        let entry = build_entry(trajectory_id, Some(parent_id), parent_seq + 1, EntryKind::Delegation, payload)?;
+        let entry = build_entry(
+            trajectory_id,
+            Some(parent_id),
+            parent_seq + 1,
+            EntryKind::Delegation,
+            payload,
+        )?;
         self.insert_entry(&entry, true).await?;
         Ok(entry)
     }
@@ -185,7 +217,11 @@ impl PostgresLedger {
     }
 
     pub async fn entries(&self, trajectory_id: TrajectoryId) -> Result<Vec<Entry>> {
-        let client = self.pool.get().await.map_err(|e| Error::Ledger(e.to_string()))?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| Error::Ledger(e.to_string()))?;
         let rows = client
             .query(
                 "SELECT id, trajectory_id, parent_id, seq, kind, payload_bytes
@@ -208,7 +244,11 @@ impl PostgresLedger {
     // ---- internals ----
 
     async fn current_head(&self, trajectory_id: TrajectoryId) -> Result<(ContentHash, u64)> {
-        let client = self.pool.get().await.map_err(|e| Error::Ledger(e.to_string()))?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| Error::Ledger(e.to_string()))?;
         let rows = client
             .query(
                 "SELECT head_id, head_seq FROM heads WHERE trajectory_id = $1 AND branch = 'main'",
@@ -233,7 +273,9 @@ impl PostgresLedger {
 
         let recomputed = blake3::hash(&payload_bytes);
         if recomputed.as_bytes() != entry.id.as_bytes() {
-            return Err(Error::Invariant("entry id does not match payload hash".into()));
+            return Err(Error::Invariant(
+                "entry id does not match payload hash".into(),
+            ));
         }
 
         let now = std::time::SystemTime::now()
@@ -244,7 +286,11 @@ impl PostgresLedger {
         let kind_str = crate::kind_to_str(entry.kind);
         let parent_bytes: Option<Vec<u8>> = entry.parent.map(|p| p.0.to_vec());
 
-        let client = self.pool.get().await.map_err(|e| Error::Ledger(e.to_string()))?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| Error::Ledger(e.to_string()))?;
 
         client
             .execute(

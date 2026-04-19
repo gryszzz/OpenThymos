@@ -48,8 +48,7 @@ impl OpenAiCognition {
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| Error::Other("OPENAI_API_KEY is not set".into()))?;
-        let base_url =
-            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.into());
+        let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.into());
         let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
         Self::new(api_key, base_url, model)
     }
@@ -282,8 +281,7 @@ fn build_opening_user_message(ctx: &CognitionContext<'_>) -> String {
     } else {
         let mut lines = Vec::new();
         for (key, state) in &ctx.world.resources {
-            let v =
-                serde_json::to_string(&state.value).unwrap_or_else(|_| "<unprintable>".into());
+            let v = serde_json::to_string(&state.value).unwrap_or_else(|_| "<unprintable>".into());
             lines.push(format!(
                 "  {}:{} v{} = {}",
                 key.kind, key.id, state.version, v
@@ -356,9 +354,7 @@ fn build_tool_results(
             Some(HistoryOutcome::Rejected(reason)) => {
                 format!("Rejected by runtime. Reason: {reason:?}")
             }
-            None => {
-                "Proposal was not executed this turn (runtime deferred or suspended).".into()
-            }
+            None => "Proposal was not executed this turn (runtime deferred or suspended).".into(),
         };
 
         messages.push(json!({

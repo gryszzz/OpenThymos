@@ -22,11 +22,7 @@ pub mod openai;
 
 use serde::{Deserialize, Serialize};
 use thymos_core::{
-    commit::Observation,
-    error::Result,
-    intent::Intent,
-    proposal::RejectionReason,
-    world::World,
+    commit::Observation, error::Result, intent::Intent, proposal::RejectionReason, world::World,
     writ::Writ,
 };
 use thymos_tools::ToolRegistry;
@@ -238,58 +234,60 @@ impl Default for CognitionConfig {
 /// Falls back to mock if the requested provider's API key is not set.
 pub fn build_cognition(config: &CognitionConfig) -> Box<dyn Cognition> {
     match config.provider {
-        CognitionProvider::Anthropic => {
-            match anthropic::AnthropicCognition::from_env() {
-                Ok(mut c) => {
-                    if let Some(m) = &config.model {
-                        c = c.with_model(m.as_str());
-                    }
-                    if let Some(t) = config.max_tokens {
-                        c = c.with_max_tokens(t);
-                    }
-                    if let Some(tb) = config.thinking_budget_tokens {
-                        c = c.with_thinking(tb);
-                    }
-                    if !config.cache_prefix {
-                        c = c.without_cache_prefix();
-                    }
-                    Box::new(c)
+        CognitionProvider::Anthropic => match anthropic::AnthropicCognition::from_env() {
+            Ok(mut c) => {
+                if let Some(m) = &config.model {
+                    c = c.with_model(m.as_str());
                 }
-                Err(_) => {
-                    eprintln!("warn: ANTHROPIC_API_KEY not set, falling back to mock");
-                    Box::new(mock::MockCognition::new(vec![], Some("no cognition configured".into())))
+                if let Some(t) = config.max_tokens {
+                    c = c.with_max_tokens(t);
                 }
+                if let Some(tb) = config.thinking_budget_tokens {
+                    c = c.with_thinking(tb);
+                }
+                if !config.cache_prefix {
+                    c = c.without_cache_prefix();
+                }
+                Box::new(c)
             }
-        }
-        CognitionProvider::Openai => {
-            match openai::OpenAiCognition::from_env() {
-                Ok(mut c) => {
-                    if let Some(m) = &config.model {
-                        c = c.with_model(m.as_str());
-                    }
-                    if let Some(t) = config.max_tokens {
-                        c = c.with_max_tokens(t);
-                    }
-                    if let Some(u) = &config.base_url {
-                        c = c.with_base_url(u.as_str());
-                    }
-                    Box::new(c)
-                }
-                Err(_) => {
-                    eprintln!("warn: OPENAI_API_KEY not set, falling back to mock");
-                    Box::new(mock::MockCognition::new(vec![], Some("no cognition configured".into())))
-                }
+            Err(_) => {
+                eprintln!("warn: ANTHROPIC_API_KEY not set, falling back to mock");
+                Box::new(mock::MockCognition::new(
+                    vec![],
+                    Some("no cognition configured".into()),
+                ))
             }
-        }
+        },
+        CognitionProvider::Openai => match openai::OpenAiCognition::from_env() {
+            Ok(mut c) => {
+                if let Some(m) = &config.model {
+                    c = c.with_model(m.as_str());
+                }
+                if let Some(t) = config.max_tokens {
+                    c = c.with_max_tokens(t);
+                }
+                if let Some(u) = &config.base_url {
+                    c = c.with_base_url(u.as_str());
+                }
+                Box::new(c)
+            }
+            Err(_) => {
+                eprintln!("warn: OPENAI_API_KEY not set, falling back to mock");
+                Box::new(mock::MockCognition::new(
+                    vec![],
+                    Some("no cognition configured".into()),
+                ))
+            }
+        },
         CognitionProvider::Local => {
             // Local uses the OpenAI-compatible API with a custom base URL.
-            let base_url = config.base_url.clone()
+            let base_url = config
+                .base_url
+                .clone()
                 .unwrap_or_else(|| "http://localhost:11434/v1".into());
-            let model = config.model.clone()
-                .unwrap_or_else(|| "llama3".into());
+            let model = config.model.clone().unwrap_or_else(|| "llama3".into());
             // Local endpoints often don't need an API key; use a dummy.
-            let api_key = std::env::var("OPENAI_API_KEY")
-                .unwrap_or_else(|_| "local".into());
+            let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "local".into());
             match openai::OpenAiCognition::new(api_key, base_url, model) {
                 Ok(mut c) => {
                     if let Some(t) = config.max_tokens {
@@ -297,13 +295,15 @@ pub fn build_cognition(config: &CognitionConfig) -> Box<dyn Cognition> {
                     }
                     Box::new(c)
                 }
-                Err(_) => {
-                    Box::new(mock::MockCognition::new(vec![], Some("local cognition failed to init".into())))
-                }
+                Err(_) => Box::new(mock::MockCognition::new(
+                    vec![],
+                    Some("local cognition failed to init".into()),
+                )),
             }
         }
-        CognitionProvider::Mock => {
-            Box::new(mock::MockCognition::new(vec![], Some("mock cognition".into())))
-        }
+        CognitionProvider::Mock => Box::new(mock::MockCognition::new(
+            vec![],
+            Some("mock cognition".into()),
+        )),
     }
 }

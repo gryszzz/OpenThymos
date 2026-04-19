@@ -194,17 +194,24 @@ impl ThymosClient {
             cognition,
             tool_scopes: vec![],
         };
-        let resp = self.client.post(self.url("/runs")).json(&body).send().await?;
+        let resp = self
+            .client
+            .post(self.url("/runs"))
+            .json(&body)
+            .send()
+            .await?;
         let resp = self.check_error(resp).await?;
         Ok(resp.json().await?)
     }
 
     /// POST /runs with full options.
-    pub async fn create_run_full(
-        &self,
-        req: CreateRunRequest,
-    ) -> Result<CreateRunResponse, Error> {
-        let resp = self.client.post(self.url("/runs")).json(&req).send().await?;
+    pub async fn create_run_full(&self, req: CreateRunRequest) -> Result<CreateRunResponse, Error> {
+        let resp = self
+            .client
+            .post(self.url("/runs"))
+            .json(&req)
+            .send()
+            .await?;
         let resp = self.check_error(resp).await?;
         Ok(resp.json().await?)
     }
@@ -294,10 +301,7 @@ impl ThymosClient {
     }
 
     /// GET /audit/entries with optional filters.
-    pub async fn audit_entries(
-        &self,
-        query: &AuditQuery,
-    ) -> Result<AuditEntriesResponse, Error> {
+    pub async fn audit_entries(&self, query: &AuditQuery) -> Result<AuditEntriesResponse, Error> {
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(ref id) = query.run_id {
             params.push(("run_id", id.clone()));

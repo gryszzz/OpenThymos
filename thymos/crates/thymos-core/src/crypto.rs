@@ -42,13 +42,14 @@ pub fn verify(pk: &PublicKey, message: &[u8], sig: &SignatureBytes) -> Result<()
 pub mod hex32 {
     use super::*;
 
-    pub fn serialize<S: Serializer>(bytes: &[u8; 32], s: S) -> std::result::Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        bytes: &[u8; 32],
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         s.serialize_str(&hex::encode(bytes))
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> std::result::Result<[u8; 32], D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<[u8; 32], D::Error> {
         let s = String::deserialize(d)?;
         let v = hex::decode(&s).map_err(serde::de::Error::custom)?;
         v.try_into()
@@ -59,13 +60,14 @@ pub mod hex32 {
 pub mod hex64 {
     use super::*;
 
-    pub fn serialize<S: Serializer>(bytes: &[u8; 64], s: S) -> std::result::Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        bytes: &[u8; 64],
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         s.serialize_str(&hex::encode(bytes))
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> std::result::Result<[u8; 64], D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<[u8; 64], D::Error> {
         let s = String::deserialize(d)?;
         let v = hex::decode(&s).map_err(serde::de::Error::custom)?;
         v.try_into()

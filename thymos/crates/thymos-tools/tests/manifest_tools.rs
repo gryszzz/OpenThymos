@@ -2,10 +2,8 @@
 
 use serde_json::json;
 use std::io::Write;
-use thymos_tools::{
-    ManifestTool, ToolContract, ToolInvocation, ToolManifest, ToolRegistry,
-};
 use thymos_core::world::World;
+use thymos_tools::{ManifestTool, ToolContract, ToolInvocation, ToolManifest, ToolRegistry};
 
 fn sample_manifest() -> serde_json::Value {
     json!({
@@ -90,8 +88,12 @@ fn load_manifest_from_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("my_tool.json");
     let mut f = std::fs::File::create(&path).unwrap();
-    f.write_all(serde_json::to_string_pretty(&sample_manifest()).unwrap().as_bytes())
-        .unwrap();
+    f.write_all(
+        serde_json::to_string_pretty(&sample_manifest())
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
 
     let mut registry = ToolRegistry::new();
     registry.load_manifest(&path).unwrap();

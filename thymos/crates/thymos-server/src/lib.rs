@@ -36,7 +36,6 @@ use tokio::sync::{broadcast, oneshot, watch};
 use tower_http::cors::CorsLayer;
 
 use thymos_cognition::{build_cognition, CognitionConfig, CognitionEvent, NonStreamingAdapter};
-use thymos_runtime::agent_async::ApprovalDecision;
 use thymos_core::{
     crypto::{generate_signing_key, public_key_of},
     writ::{Budget, DelegationBounds, EffectCeiling, TimeWindow, ToolPattern, Writ, WritBody},
@@ -44,11 +43,92 @@ use thymos_core::{
 };
 use thymos_ledger::{EntryPayload, Ledger};
 use thymos_policy::{PolicyEngine, WritAuthorityPolicy};
+use thymos_runtime::agent_async::ApprovalDecision;
 use thymos_runtime::{AgentRunOptions, AgentRunSummary, Runtime};
 use thymos_tools::{
     DelegateTool, HttpTool, KvGetTool, KvSetTool, MemoryRecallTool, MemoryStoreTool, ShellTool,
     ToolRegistry,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeMode {
+    Reference,
+    Production,
+}
+
+impl RuntimeMode {
+    pub fn from_env() -> Result<Self, String> {
+        match std::env::var("THYMOS_RUNTIME_MODE")
+            .unwrap_or_else(|_| "reference".into())
+            .to_lowercase()
+            .as_str()
+        {
+            "reference" => Ok(Self::Reference),
+            "production" => Ok(Self::Production),
+            other => Err(format!("unsupported THYMOS_RUNTIME_MODE '{other}'")),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    pub runtime_mode: RuntimeMode,
+    pub ledger_path: Option<String>,
+    pub postgres_url: Option<String>,
+    pub run_db_path: String,
+    pub gateway_db_path: String,
+    pub marketplace_db_path: String,
+}
+
+impl ServerConfig {
+    pub fn from_env() -> Result<Self, String> {
+        let runtime_mode = RuntimeMode::from_env()?;
+        let ledger_path = std::env::var("THYMOS_LEDGER_PATH").ok();
+        let postgres_url = std::env::var("THYMOS_POSTGRES_URL").ok();
+        let run_db_path =
+            std::env::var("THYMOS_DB_PATH").unwrap_or_else(|_| "thymos-runs.db".into());
+        let gateway_db_path =
+            std::env::var("THYMOS_GATEWAY_DB_PATH").unwrap_or_else(|_| "thymos-gateway.db".into());
+        let marketplace_db_path = std::env::var("THYMOS_MARKETPLACE_DB_PATH")
+            .unwrap_or_else(|_| "thymos-marketplace.db".into());
+        let tool_fabric =
+            std::env::var("THYMOS_TOOL_FABRIC").unwrap_or_else(|_| "in_process".into());
+        let worker_bin = std::env::var("THYMOS_WORKER_BIN").ok();
+
+        if runtime_mode == RuntimeMode::Production && ledger_path.is_none() {
+            if postgres_url.is_some() {
+                return Err(
+                    "THYMOS_POSTGRES_URL is configured, but the server runtime is still wired to the synchronous SQLite ledger path. For now, production mode requires THYMOS_LEDGER_PATH.".into(),
+                );
+            }
+            return Err(
+                "production mode requires THYMOS_LEDGER_PATH so the ledger is not ephemeral".into(),
+            );
+        }
+
+        if runtime_mode == RuntimeMode::Production && tool_fabric != "worker" {
+            return Err(
+                "production mode requires THYMOS_TOOL_FABRIC=worker so shell/http execution does not run in-process".into(),
+            );
+        }
+
+        if runtime_mode == RuntimeMode::Production && worker_bin.is_none() {
+            return Err(
+                "production mode requires THYMOS_WORKER_BIN to point at the thymos-worker binary"
+                    .into(),
+            );
+        }
+
+        Ok(Self {
+            runtime_mode,
+            ledger_path,
+            postgres_url,
+            run_db_path,
+            gateway_db_path,
+            marketplace_db_path,
+        })
+    }
+}
 
 /// Server-side record of a completed or in-progress run.
 #[derive(Clone, Debug, Serialize)]
@@ -116,6 +196,7 @@ pub struct ResourceDto {
 
 /// Shared application state.
 pub struct AppState {
+    pub runtime_mode: RuntimeMode,
     pub runtime: Arc<Runtime>,
     pub runs: Mutex<HashMap<String, RunRecord>>,
     /// Ledger entry events per run.
@@ -283,8 +364,14 @@ fn tenant_can_access(run_tenant: &str, caller_tenant: &str) -> bool {
 }
 
 /// GET /health — liveness probe (bypasses API key auth).
-async fn health() -> impl IntoResponse {
-    Json(serde_json::json!({ "status": "ok" }))
+async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "status": "ok",
+        "mode": match state.runtime_mode {
+            RuntimeMode::Reference => "reference",
+            RuntimeMode::Production => "production",
+        }
+    }))
 }
 
 /// GET /usage — per-key usage stats dashboard.
@@ -436,10 +523,7 @@ async fn resume_run(
             Box::new(move |_traj_id, _proposal_id, channel, _reason| {
                 let (tx, rx) = oneshot::channel();
                 let mut pending = state_for_approvals.pending_approvals.lock().unwrap();
-                pending.insert(
-                    (run_id_for_approvals.clone(), channel),
-                    tx,
-                );
+                pending.insert((run_id_for_approvals.clone(), channel), tx);
                 rx
             });
 
@@ -547,7 +631,11 @@ async fn create_run(
 
     // Input validation.
     if req.task.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "task is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "task is required" })),
+        )
+            .into_response();
     }
     if req.task.len() > MAX_TASK_LENGTH {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("task exceeds max length of {MAX_TASK_LENGTH} characters") }))).into_response();
@@ -559,7 +647,11 @@ async fn create_run(
     // Global concurrency check.
     let active = state.active_runs.load(Ordering::Relaxed);
     if active >= MAX_CONCURRENT_RUNS_GLOBAL {
-        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": "server at capacity" }))).into_response();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "server at capacity" })),
+        )
+            .into_response();
     }
 
     let tenant_id = extract_tenant_id(&headers, &jwt_claims, &gateway_ctx);
@@ -567,7 +659,8 @@ async fn create_run(
     // Per-tenant concurrency check.
     if !tenant_id.is_empty() {
         let runs = state.runs.lock().unwrap();
-        let tenant_running = runs.values()
+        let tenant_running = runs
+            .values()
             .filter(|r| r.tenant_id == tenant_id && r.status == RunStatus::Running)
             .count() as u32;
         if tenant_running >= MAX_CONCURRENT_RUNS_PER_TENANT {
@@ -703,10 +796,7 @@ async fn create_run(
             Box::new(move |_traj_id, _proposal_id, channel, _reason| {
                 let (tx, rx) = oneshot::channel();
                 let mut pending = state_for_approvals.pending_approvals.lock().unwrap();
-                pending.insert(
-                    (run_id_for_approvals.clone(), channel),
-                    tx,
-                );
+                pending.insert((run_id_for_approvals.clone(), channel), tx);
                 rx
             });
 
@@ -847,7 +937,11 @@ async fn list_runs(
 
     // Simple pagination on the collected results.
     let total = results.len();
-    results = results.into_iter().skip(offset as usize).take(limit as usize).collect();
+    results = results
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect();
 
     (
         StatusCode::OK,
@@ -1197,7 +1291,11 @@ async fn get_delegations(
                     }
                 })
                 .collect();
-            (StatusCode::OK, Json(serde_json::json!({ "delegations": delegations }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "delegations": delegations })),
+            )
+                .into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1209,10 +1307,7 @@ async fn get_delegations(
 
 fn entry_to_dto(e: &thymos_ledger::Entry) -> EntryDto {
     let (kind, detail) = match &e.payload {
-        EntryPayload::Root { note } => (
-            "root".into(),
-            serde_json::json!({ "note": note }),
-        ),
+        EntryPayload::Root { note } => ("root".into(), serde_json::json!({ "note": note })),
         EntryPayload::Commit(c) => (
             "commit".into(),
             serde_json::json!({
@@ -1228,7 +1323,9 @@ fn entry_to_dto(e: &thymos_ledger::Entry) -> EntryDto {
                 "reason": format!("{:?}", reason),
             }),
         ),
-        EntryPayload::PendingApproval { channel, reason, .. } => (
+        EntryPayload::PendingApproval {
+            channel, reason, ..
+        } => (
             "pending_approval".into(),
             serde_json::json!({ "channel": channel, "reason": reason }),
         ),
