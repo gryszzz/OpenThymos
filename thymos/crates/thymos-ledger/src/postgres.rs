@@ -18,7 +18,7 @@ use thymos_core::{
     CommitId, ContentHash, Error, Result, TrajectoryId,
 };
 
-use crate::{build_entry, Entry, EntryKind, EntryPayload};
+use crate::{build_entry, AuditEntry, Entry, EntryKind, EntryPayload};
 
 pub struct PostgresLedger {
     pool: Pool,
@@ -239,6 +239,139 @@ impl PostgresLedger {
     pub async fn verify_integrity(&self, trajectory_id: TrajectoryId) -> Result<()> {
         let entries = self.entries(trajectory_id).await?;
         crate::verify_integrity_entries(&entries)
+    }
+
+    /// Query entries across all trajectories with optional filters.
+    ///
+    /// - `trajectory_id`: restrict to a single trajectory
+    /// - `kind`: restrict to a specific entry kind (e.g. "commit", "rejection")
+    /// - `from_ts` / `to_ts`: unix-second time range on `created_at`
+    /// - `limit`: max rows returned (default 1000)
+    pub async fn query_entries(
+        &self,
+        trajectory_id: Option<TrajectoryId>,
+        kind: Option<&str>,
+        from_ts: Option<u64>,
+        to_ts: Option<u64>,
+        limit: Option<u32>,
+    ) -> Result<Vec<AuditEntry>> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| Error::Ledger(e.to_string()))?;
+
+        let mut sql = String::from(
+            "SELECT id, trajectory_id, parent_id, seq, kind, payload_bytes, created_at
+             FROM entries WHERE 1=1",
+        );
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> = Vec::new();
+        let mut n: usize = 0;
+
+        let traj_bytes: Option<Vec<u8>> = trajectory_id.map(|t| t.0.as_bytes().to_vec());
+        if let Some(ref bytes) = traj_bytes {
+            n += 1;
+            sql.push_str(&format!(" AND trajectory_id = ${n}"));
+            params.push(Box::new(bytes.clone()));
+        }
+        if let Some(k) = kind {
+            n += 1;
+            sql.push_str(&format!(" AND kind = ${n}"));
+            params.push(Box::new(k.to_string()));
+        }
+        if let Some(from) = from_ts {
+            n += 1;
+            sql.push_str(&format!(" AND created_at >= ${n}"));
+            params.push(Box::new(from as i64));
+        }
+        if let Some(to) = to_ts {
+            n += 1;
+            sql.push_str(&format!(" AND created_at <= ${n}"));
+            params.push(Box::new(to as i64));
+        }
+        sql.push_str(" ORDER BY created_at ASC, seq ASC");
+        let row_limit = limit.unwrap_or(1000);
+        sql.push_str(&format!(" LIMIT {row_limit}"));
+
+        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let rows = client
+            .query(sql.as_str(), &param_refs[..])
+            .await
+            .map_err(|e| Error::Ledger(e.to_string()))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows.iter() {
+            let id_bytes: &[u8] = row.get(0);
+            let traj_bytes: &[u8] = row.get(1);
+            let seq: i64 = row.get(3);
+            let kind_str: &str = row.get(4);
+            let payload_bytes: &[u8] = row.get(5);
+            let created_at: i64 = row.get(6);
+            let payload: EntryPayload = serde_json::from_slice(payload_bytes)
+                .map_err(|e| Error::Ledger(format!("deserialize payload: {e}")))?;
+            out.push(AuditEntry {
+                id: hex::encode(id_bytes),
+                trajectory_id: hex::encode(traj_bytes),
+                seq: seq as u64,
+                kind: kind_str.to_string(),
+                payload,
+                created_at: created_at as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Count entries matching the given filters.
+    pub async fn count_entries(
+        &self,
+        trajectory_id: Option<TrajectoryId>,
+        kind: Option<&str>,
+        from_ts: Option<u64>,
+        to_ts: Option<u64>,
+    ) -> Result<u64> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| Error::Ledger(e.to_string()))?;
+
+        let mut sql = String::from("SELECT COUNT(*) FROM entries WHERE 1=1");
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> = Vec::new();
+        let mut n: usize = 0;
+
+        let traj_bytes: Option<Vec<u8>> = trajectory_id.map(|t| t.0.as_bytes().to_vec());
+        if let Some(ref bytes) = traj_bytes {
+            n += 1;
+            sql.push_str(&format!(" AND trajectory_id = ${n}"));
+            params.push(Box::new(bytes.clone()));
+        }
+        if let Some(k) = kind {
+            n += 1;
+            sql.push_str(&format!(" AND kind = ${n}"));
+            params.push(Box::new(k.to_string()));
+        }
+        if let Some(from) = from_ts {
+            n += 1;
+            sql.push_str(&format!(" AND created_at >= ${n}"));
+            params.push(Box::new(from as i64));
+        }
+        if let Some(to) = to_ts {
+            n += 1;
+            sql.push_str(&format!(" AND created_at <= ${n}"));
+            params.push(Box::new(to as i64));
+        }
+
+        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let row = client
+            .query_one(sql.as_str(), &param_refs[..])
+            .await
+            .map_err(|e| Error::Ledger(e.to_string()))?;
+        let count: i64 = row.get(0);
+        Ok(count as u64)
     }
 
     // ---- internals ----

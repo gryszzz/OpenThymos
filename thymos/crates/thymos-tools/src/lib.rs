@@ -1151,7 +1151,9 @@ impl ToolContract for MemoryStoreTool {
         "Promote a distilled fact into long-term memory. Requires a key, \
          content string, and an array of source_commits (commit IDs that this \
          memory derives from) for provenance. Creates or replaces a \
-         memory:{key} resource."
+         memory:{stratum}:{key} resource. `stratum` is one of 'working' \
+         (ephemeral, current-task scratch), 'episodic' (per-trajectory \
+         experiences), or 'semantic' (default, distilled long-term knowledge)."
     }
 
     fn input_schema(&self) -> Value {
@@ -1160,6 +1162,11 @@ impl ToolContract for MemoryStoreTool {
             "properties": {
                 "key":            { "type": "string", "description": "Memory key (unique identifier)" },
                 "content":        { "type": "string", "description": "Distilled fact or knowledge" },
+                "stratum":        {
+                    "type": "string",
+                    "enum": ["working", "episodic", "semantic"],
+                    "description": "Memory stratum (default: semantic)"
+                },
                 "source_commits": {
                     "type": "array",
                     "items": { "type": "string" },
@@ -1196,26 +1203,34 @@ impl ToolContract for MemoryStoreTool {
 
         let key = inv.args["key"].as_str().unwrap().to_string();
         let content = inv.args["content"].as_str().unwrap().to_string();
+        let stratum = inv
+            .args
+            .get("stratum")
+            .and_then(|v| v.as_str())
+            .unwrap_or("semantic")
+            .to_string();
         let source_commits = inv
             .args
             .get("source_commits")
             .cloned()
             .unwrap_or(serde_json::json!([]));
 
+        let resource_id = format!("{stratum}:{key}");
         let value = serde_json::json!({
             "content": content,
+            "stratum": stratum,
             "source_commits": source_commits,
         });
 
-        let delta_op = match inv.world.get(&ResourceKey::new("memory", &key)) {
+        let delta_op = match inv.world.get(&ResourceKey::new("memory", &resource_id)) {
             None => DeltaOp::Create {
                 kind: "memory".into(),
-                id: key.clone(),
+                id: resource_id.clone(),
                 value: value.clone(),
             },
             Some(state) => DeltaOp::Replace {
                 kind: "memory".into(),
-                id: key.clone(),
+                id: resource_id.clone(),
                 expected_version: state.version,
                 value: value.clone(),
             },
@@ -1225,7 +1240,11 @@ impl ToolContract for MemoryStoreTool {
             delta: StructuredDelta::single(delta_op),
             observation: Observation {
                 tool: "memory_store".into(),
-                output: serde_json::json!({ "key": key, "stored": true }),
+                output: serde_json::json!({
+                    "key": key,
+                    "stratum": stratum,
+                    "stored": true,
+                }),
                 latency_ms: 0,
             },
         })
@@ -1257,14 +1276,20 @@ impl ToolContract for MemoryRecallTool {
 
     fn description(&self) -> &str {
         "Recall a previously stored memory by key. Returns the content and \
-         its provenance (source_commits). Returns null if the key is not found."
+         its provenance (source_commits). `stratum` defaults to 'semantic'. \
+         Returns null if the key is not found in that stratum."
     }
 
     fn input_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "key": { "type": "string", "description": "Memory key to recall" }
+                "key":     { "type": "string", "description": "Memory key to recall" },
+                "stratum": {
+                    "type": "string",
+                    "enum": ["working", "episodic", "semantic"],
+                    "description": "Memory stratum (default: semantic)"
+                }
             },
             "required": ["key"]
         })
@@ -1284,9 +1309,16 @@ impl ToolContract for MemoryRecallTool {
         use thymos_core::world::ResourceKey;
 
         let key = inv.args["key"].as_str().unwrap().to_string();
+        let stratum = inv
+            .args
+            .get("stratum")
+            .and_then(|v| v.as_str())
+            .unwrap_or("semantic")
+            .to_string();
+        let resource_id = format!("{stratum}:{key}");
         let out = inv
             .world
-            .get(&ResourceKey::new("memory", &key))
+            .get(&ResourceKey::new("memory", &resource_id))
             .map(|s| s.value.clone())
             .unwrap_or(Value::Null);
 
@@ -1294,7 +1326,11 @@ impl ToolContract for MemoryRecallTool {
             delta: StructuredDelta::default(),
             observation: Observation {
                 tool: "memory_recall".into(),
-                output: serde_json::json!({ "key": key, "memory": out }),
+                output: serde_json::json!({
+                    "key": key,
+                    "stratum": stratum,
+                    "memory": out,
+                }),
                 latency_ms: 0,
             },
         })

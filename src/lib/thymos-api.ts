@@ -23,6 +23,8 @@ export interface EntryDto {
   kind: string;
   id: string;
   detail: Record<string, unknown>;
+  /** Full 64-hex commit id (commits only). */
+  commit_id?: string;
 }
 
 export interface WorldDto {
@@ -88,6 +90,32 @@ export async function getRun(id: string) {
 export async function getWorld(id: string) {
   const res = await fetch(`${BASE}/runs/${id}/world`);
   return res.json() as Promise<WorldDto>;
+}
+
+/** GET /runs/:id/world/at?seq=N — replay world projection up to commit seq N. */
+export async function getWorldAt(id: string, seq: number) {
+  const res = await fetch(`${BASE}/runs/${id}/world/at?seq=${seq}`);
+  return res.json() as Promise<WorldDto & {
+    seq: number;
+    commits_replayed: number;
+    head_commit: string | null;
+  }>;
+}
+
+/** POST /runs/:id/branch — create a shadow (counterfactual) branch from a commit. */
+export async function branchFrom(id: string, commitId: string, note?: string) {
+  const res = await fetch(`${BASE}/runs/${id}/branch`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ commit_id: commitId, note }),
+  });
+  if (!res.ok) throw new Error(`branch failed: ${res.status}`);
+  return res.json() as Promise<{
+    branch_trajectory_id: string;
+    source_trajectory_id: string;
+    source_commit_id: string;
+    note: string;
+  }>;
 }
 
 /** Subscribe to SSE trajectory entry events. */

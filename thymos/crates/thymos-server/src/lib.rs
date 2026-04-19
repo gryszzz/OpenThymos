@@ -179,6 +179,9 @@ pub struct EntryDto {
     pub kind: String,
     pub id: String,
     pub detail: serde_json::Value,
+    /// Full (64-hex) commit id for commit entries. None for other kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -300,10 +303,12 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/runs/{id}/events", get(get_events))
         .route("/runs/{id}/stream", get(get_stream))
         .route("/runs/{id}/world", get(get_world))
+        .route("/runs/{id}/world/at", get(get_world_at))
         .route("/runs/{id}/approvals/{channel}", post(post_approval))
         .route("/runs/{id}/resume", post(resume_run))
         .route("/runs/{id}/cancel", post(cancel_run))
         .route("/runs/{id}/delegations", get(get_delegations))
+        .route("/runs/{id}/branch", post(post_branch))
         .route("/usage", get(get_usage))
         .route("/audit/entries", get(audit::get_audit_entries))
         .route("/audit/entries/count", get(audit::count_audit_entries));
@@ -1142,6 +1147,90 @@ async fn get_world(
     }
 }
 
+/// GET /runs/:id/world/at?seq=N — replay the trajectory up to `seq` and
+/// return the world projection at that commit. Used by the web debugger
+/// scrubber.
+#[derive(Deserialize)]
+struct WorldAtQuery {
+    seq: u64,
+}
+
+async fn get_world_at(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<WorldAtQuery>,
+) -> impl IntoResponse {
+    let traj_hex = {
+        let runs = state.runs.lock().unwrap();
+        runs.get(&id).map(|r| r.trajectory_id.clone())
+    };
+    let traj_hex = match traj_hex {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "run not found or not started" })),
+            )
+                .into_response()
+        }
+    };
+
+    let traj_bytes = match hex::decode(&traj_hex) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid trajectory id" })),
+            )
+                .into_response()
+        }
+    };
+    let trajectory_id = TrajectoryId(thymos_core::ContentHash(traj_bytes));
+
+    let runtime = state.runtime.clone();
+    let until_seq = q.seq;
+    let result = tokio::task::spawn_blocking(move || {
+        let mut entries = runtime.ledger.entries(trajectory_id)?;
+        entries.retain(|e| e.seq <= until_seq);
+        let (world, report) = thymos_ledger::replay(&entries, &thymos_ledger::ReplayConfig::default())?;
+        let resources: Vec<ResourceDto> = world
+            .resources
+            .iter()
+            .map(|(k, v)| ResourceDto {
+                kind: k.kind.clone(),
+                id: k.id.clone(),
+                version: v.version,
+                value: v.value.clone(),
+            })
+            .collect();
+        Ok::<_, thymos_core::Error>(serde_json::json!({
+            "seq": report.head_seq,
+            "commits_replayed": report.commits_replayed,
+            "head_commit": report.head_commit,
+            "resources": resources,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, Json(v)).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// POST /runs/:id/approvals/:channel — approve or deny a pending proposal.
 async fn post_approval(
     State(state): State<Arc<AppState>>,
@@ -1233,6 +1322,101 @@ async fn cancel_run(
         None => (
             StatusCode::GONE,
             Json(serde_json::json!({ "error": "run has already finished" })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /runs/:id/branch — create a shadow (counterfactual) branch from a commit.
+///
+/// Body: `{ "commit_id": "<64 hex>", "note": "why branching" }`
+/// Returns the new branch trajectory id; the branch starts with world state
+/// as of `commit_id` and has its own independent history going forward.
+#[derive(Deserialize)]
+struct BranchRequest {
+    commit_id: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn post_branch(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<BranchRequest>,
+) -> impl IntoResponse {
+    let traj_hex = {
+        let runs = state.runs.lock().unwrap();
+        runs.get(&id).map(|r| r.trajectory_id.clone())
+    };
+    let traj_hex = match traj_hex {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "run not found or not started" })),
+            )
+                .into_response()
+        }
+    };
+
+    let traj_bytes = match hex::decode(&traj_hex) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid trajectory id" })),
+            )
+                .into_response()
+        }
+    };
+    let trajectory_id = TrajectoryId(thymos_core::ContentHash(traj_bytes));
+
+    let commit_bytes = match hex::decode(body.commit_id.trim()) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "commit_id must be 64 hex chars" })),
+            )
+                .into_response()
+        }
+    };
+    let commit_id = thymos_core::CommitId(thymos_core::ContentHash(commit_bytes));
+    let note = body.note.unwrap_or_else(|| "shadow branch".to_string());
+
+    let run = match state.runtime.resume_run(trajectory_id) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    match run.branch_from(commit_id, &note) {
+        Ok(branch) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "branch_trajectory_id": branch.trajectory_id().to_string(),
+                "source_trajectory_id": trajectory_id.to_string(),
+                "source_commit_id": commit_id.to_string(),
+                "note": note,
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response(),
     }
@@ -1362,10 +1546,16 @@ fn entry_to_dto(e: &thymos_ledger::Entry) -> EntryDto {
         ),
     };
 
+    let commit_id = match &e.payload {
+        EntryPayload::Commit(c) => Some(c.id.to_string()),
+        _ => None,
+    };
+
     EntryDto {
         seq: e.seq,
         kind,
         id: e.id.short().to_string(),
         detail,
+        commit_id,
     }
 }

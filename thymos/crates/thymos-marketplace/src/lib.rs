@@ -21,6 +21,12 @@ pub enum MarketplaceError {
     VersionConflict { name: String, version: String },
     #[error("integrity mismatch: expected {expected}, got {actual}")]
     IntegrityMismatch { expected: String, actual: String },
+    #[error("signature missing — package is unsigned")]
+    SignatureMissing,
+    #[error("signature invalid: {0}")]
+    SignatureInvalid(String),
+    #[error("untrusted publisher: {0}")]
+    UntrustedPublisher(String),
     #[error("invalid manifest: {0}")]
     InvalidManifest(String),
 }
@@ -70,6 +76,14 @@ pub struct Package {
     /// ISO-8601 timestamp of publication.
     #[serde(default)]
     pub published_at: String,
+    /// Ed25519 signature over `content_hash` bytes, hex-encoded (128 chars).
+    /// Empty string means unsigned.
+    #[serde(default)]
+    pub signature: String,
+    /// Hex-encoded ed25519 public key of the publisher (64 chars).
+    /// Empty string means unsigned.
+    #[serde(default)]
+    pub publisher_pubkey: String,
 }
 
 impl Package {
@@ -91,6 +105,81 @@ impl Package {
                 expected: self.content_hash.clone(),
                 actual,
             });
+        }
+        Ok(())
+    }
+
+    /// Sign this package with an ed25519 signing key. Overwrites any previous
+    /// signature. Fills in `content_hash` if empty.
+    pub fn sign(
+        &mut self,
+        signing_key: &thymos_core::crypto::SigningKey,
+    ) -> Result<(), MarketplaceError> {
+        if self.content_hash.is_empty() {
+            self.content_hash = self.compute_hash();
+        }
+        let pubkey = thymos_core::crypto::public_key_of(signing_key);
+        let message = self.content_hash.as_bytes();
+        let sig = thymos_core::crypto::sign(signing_key, message);
+        self.signature = hex::encode(sig);
+        self.publisher_pubkey = hex::encode(pubkey);
+        Ok(())
+    }
+
+    /// Verify the ed25519 signature. Also re-checks the content hash.
+    /// Returns `SignatureMissing` if the package is unsigned.
+    pub fn verify_signature(&self) -> Result<(), MarketplaceError> {
+        self.verify_integrity()?;
+        if self.signature.is_empty() || self.publisher_pubkey.is_empty() {
+            return Err(MarketplaceError::SignatureMissing);
+        }
+        let sig_bytes: [u8; 64] = hex::decode(&self.signature)
+            .map_err(|e| MarketplaceError::SignatureInvalid(format!("sig hex: {e}")))?
+            .try_into()
+            .map_err(|_| MarketplaceError::SignatureInvalid("sig must be 64 bytes".into()))?;
+        let pk_bytes: [u8; 32] = hex::decode(&self.publisher_pubkey)
+            .map_err(|e| MarketplaceError::SignatureInvalid(format!("pubkey hex: {e}")))?
+            .try_into()
+            .map_err(|_| MarketplaceError::SignatureInvalid("pubkey must be 32 bytes".into()))?;
+        let message = self.content_hash.as_bytes();
+        thymos_core::crypto::verify(&pk_bytes, message, &sig_bytes)
+            .map_err(|e| MarketplaceError::SignatureInvalid(e.to_string()))
+    }
+}
+
+/// A trust policy for package installation. Holds the set of publisher
+/// public keys (hex-encoded) that are allowed to install into a runtime.
+#[derive(Clone, Debug, Default)]
+pub struct TrustedPublishers {
+    keys: std::collections::HashSet<String>,
+}
+
+impl TrustedPublishers {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_keys(keys: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            keys: keys.into_iter().collect(),
+        }
+    }
+
+    pub fn trust(&mut self, pubkey_hex: impl Into<String>) {
+        self.keys.insert(pubkey_hex.into());
+    }
+
+    pub fn contains(&self, pubkey_hex: &str) -> bool {
+        self.keys.contains(pubkey_hex)
+    }
+
+    /// Require that the package is signed by a trusted publisher.
+    pub fn enforce(&self, pkg: &Package) -> Result<(), MarketplaceError> {
+        pkg.verify_signature()?;
+        if !self.contains(&pkg.publisher_pubkey) {
+            return Err(MarketplaceError::UntrustedPublisher(
+                pkg.publisher_pubkey.clone(),
+            ));
         }
         Ok(())
     }
@@ -151,15 +240,17 @@ impl SqliteMarketplaceStore {
             PRAGMA synchronous = NORMAL;
 
             CREATE TABLE IF NOT EXISTS marketplace_packages (
-                name           TEXT NOT NULL,
-                version        TEXT NOT NULL,
-                description    TEXT NOT NULL,
-                author         TEXT NOT NULL,
-                tags_json      TEXT NOT NULL,
-                kind_json      TEXT NOT NULL,
-                content_hash   TEXT NOT NULL,
-                published_at   TEXT NOT NULL DEFAULT '',
-                created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+                name              TEXT NOT NULL,
+                version           TEXT NOT NULL,
+                description       TEXT NOT NULL,
+                author            TEXT NOT NULL,
+                tags_json         TEXT NOT NULL,
+                kind_json         TEXT NOT NULL,
+                content_hash      TEXT NOT NULL,
+                published_at      TEXT NOT NULL DEFAULT '',
+                signature         TEXT NOT NULL DEFAULT '',
+                publisher_pubkey  TEXT NOT NULL DEFAULT '',
+                created_at        INTEGER NOT NULL DEFAULT (unixepoch()),
                 PRIMARY KEY (name, version)
             );
 
@@ -167,14 +258,25 @@ impl SqliteMarketplaceStore {
                 ON marketplace_packages(name);
             "#,
         )
-        .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))
+        .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))?;
+
+        // Best-effort migration for pre-existing databases.
+        let _ = conn.execute(
+            "ALTER TABLE marketplace_packages ADD COLUMN signature TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE marketplace_packages ADD COLUMN publisher_pubkey TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        Ok(())
     }
 
     pub fn load_all(&self) -> Result<Vec<Package>, MarketplaceError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT name, version, description, author, tags_json, kind_json, content_hash, published_at
+                "SELECT name, version, description, author, tags_json, kind_json, content_hash, published_at, signature, publisher_pubkey
                  FROM marketplace_packages
                  ORDER BY name ASC, version ASC",
             )
@@ -208,6 +310,8 @@ impl SqliteMarketplaceStore {
                     kind,
                     content_hash: row.get(6)?,
                     published_at: row.get(7)?,
+                    signature: row.get(8)?,
+                    publisher_pubkey: row.get(9)?,
                 })
             })
             .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))?;
@@ -223,8 +327,8 @@ impl SqliteMarketplaceStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO marketplace_packages
-                (name, version, description, author, tags_json, kind_json, content_hash, published_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (name, version, description, author, tags_json, kind_json, content_hash, published_at, signature, publisher_pubkey)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 pkg.name,
                 pkg.version,
@@ -236,6 +340,8 @@ impl SqliteMarketplaceStore {
                     .map_err(|e| MarketplaceError::InvalidManifest(e.to_string()))?,
                 pkg.content_hash,
                 pkg.published_at,
+                pkg.signature,
+                pkg.publisher_pubkey,
             ],
         )
         .map_err(|e| {
@@ -485,6 +591,8 @@ mod tests {
             },
             content_hash: String::new(),
             published_at: String::new(),
+            signature: String::new(),
+            publisher_pubkey: String::new(),
         }
     }
 
@@ -526,6 +634,8 @@ mod tests {
             },
             content_hash: String::new(),
             published_at: String::new(),
+            signature: String::new(),
+            publisher_pubkey: String::new(),
         }
     }
 
@@ -667,6 +777,51 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(mp.total_versions(), 3);
         assert_eq!(mp.total_packages(), 2);
+    }
+
+    #[test]
+    fn sign_and_verify() {
+        let mut pkg = sample_manifest_pkg("thymos/kv", "0.1.0");
+        let sk = thymos_core::crypto::generate_signing_key();
+        pkg.sign(&sk).unwrap();
+
+        assert_eq!(pkg.signature.len(), 128);
+        assert_eq!(pkg.publisher_pubkey.len(), 64);
+        pkg.verify_signature().unwrap();
+
+        // Tampering with the payload breaks the signature.
+        let mut bad = pkg.clone();
+        bad.content_hash = "deadbeef".into();
+        let err = bad.verify_signature().unwrap_err();
+        assert!(matches!(err, MarketplaceError::IntegrityMismatch { .. }));
+    }
+
+    #[test]
+    fn trusted_publisher_gate() {
+        let mut pkg = sample_manifest_pkg("thymos/kv", "0.1.0");
+        let sk = thymos_core::crypto::generate_signing_key();
+        pkg.sign(&sk).unwrap();
+
+        let mut trust = TrustedPublishers::new();
+        let err = trust.enforce(&pkg).unwrap_err();
+        assert!(matches!(err, MarketplaceError::UntrustedPublisher(_)));
+
+        trust.trust(pkg.publisher_pubkey.clone());
+        trust.enforce(&pkg).unwrap();
+    }
+
+    #[test]
+    fn signed_package_survives_sqlite_roundtrip() {
+        let store = SqliteMarketplaceStore::open_in_memory().unwrap();
+        let mut pkg = sample_manifest_pkg("thymos/signed", "1.0.0");
+        let sk = thymos_core::crypto::generate_signing_key();
+        pkg.sign(&sk).unwrap();
+        store.publish(&pkg).unwrap();
+
+        let loaded = store.load_all().unwrap();
+        assert_eq!(loaded.len(), 1);
+        loaded[0].verify_signature().unwrap();
+        assert_eq!(loaded[0].publisher_pubkey, pkg.publisher_pubkey);
     }
 
     #[test]

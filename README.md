@@ -262,24 +262,25 @@ Implemented and under test:
 - [x] **Coding tool surface** (`fs_read`, `fs_patch`, `list_files`, `repo_map`, `grep`, `test_run`) with path confinement
 - [x] Intent → Proposal compiler with writ binding, policy eval, budget check
 - [x] Sync + async agent loop with approval callback and cancellation
-- [x] Multi-provider cognition (Anthropic, OpenAI, local, mock)
+- [x] Multi-provider cognition (Anthropic, OpenAI, LM Studio, Hugging Face Router, local, mock)
 - [x] axum HTTP server with SSE token + ledger streaming
 - [x] JWT (HS256, iss/aud) + API-gateway key auth with tenant isolation
 - [x] SQLite-backed run persistence and resume
 - [x] CLI + Rust client SDK
-- [x] Marketplace (in-memory)
+- [x] Marketplace (in-memory + SQLite) with Ed25519-signed packages and trusted-publisher gate
 - [x] OpenTelemetry OTLP tracing
 - [x] Docker + docker-compose (with optional Postgres + Jaeger profiles)
+- [x] Deterministic replay with compiler-version pinning (`thymos_ledger::replay`)
+- [x] Shadow branches for counterfactual execution (`POST /runs/:id/branch`)
+- [x] Stratified memory (`working` / `episodic` / `semantic` strata)
+- [x] Web trajectory debugger: scrubber + "branch from here" in `/runs/:id`
+- [x] Postgres ledger parity with SQLite (including `query_entries` / `count_entries`)
+- [x] Distributed rate limiting (SQL-backed shared counter across server nodes)
 
 Not yet:
 
-- [ ] Deterministic replay with compiler-version pinning
-- [ ] Shadow branches for counterfactual execution
-- [ ] Stratified memory
-- [ ] Web-based trajectory debugger (beyond the current `/runs` viewer)
-- [ ] Postgres ledger parity with SQLite
-- [ ] Signed marketplace packages
-- [ ] Distributed rate limiting
+- [ ] Multi-region Postgres replication topology
+- [ ] First-party dashboard for marketplace trust + package publishing
 
 ### Tests
 

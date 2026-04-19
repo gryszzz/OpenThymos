@@ -60,16 +60,29 @@ impl ApiGateway {
     }
 
     /// Validate a key and check rate limits. Returns the key record on success.
+    ///
+    /// When a persistent store is configured, the counter lives in SQLite so
+    /// all server nodes sharing the same `gateway.sqlite` observe the same
+    /// per-key budget. Otherwise falls back to the in-memory path.
     pub fn authenticate(&self, bearer: &str) -> Result<&ApiKey, GatewayError> {
         let key = self.keys.get(bearer).ok_or(GatewayError::InvalidKey)?;
 
-        // Rate limit check.
+        if let Some(store) = &self.store {
+            let (count, _elapsed) = store
+                .incr_and_count(bearer, 60)
+                .map_err(|_| GatewayError::InvalidKey)?;
+            if count > key.rate_limit_rpm {
+                return Err(GatewayError::RateLimited);
+            }
+            return Ok(key);
+        }
+
+        // Single-node fallback.
         let mut state = self.rate_state.lock().unwrap();
         let entry = state
             .entry(bearer.to_string())
             .or_insert((0, Instant::now()));
 
-        // Reset window if more than 60 seconds have passed.
         if entry.1.elapsed().as_secs() >= 60 {
             *entry = (0, Instant::now());
         }
@@ -96,14 +109,18 @@ pub struct KeyUsageStats {
 impl ApiGateway {
     /// Return usage stats for all known keys (for a dashboard).
     pub fn usage_stats(&self) -> Vec<KeyUsageStats> {
-        let state = self.rate_state.lock().unwrap();
+        let memory_state = self.rate_state.lock().unwrap();
         self.keys
             .values()
             .map(|k| {
-                let (count, elapsed) = state
-                    .get(&k.key)
-                    .map(|(c, t)| (*c, t.elapsed().as_secs()))
-                    .unwrap_or((0, 0));
+                let (count, elapsed) = if let Some(store) = &self.store {
+                    store.rate_snapshot(&k.key).unwrap_or((0, 0))
+                } else {
+                    memory_state
+                        .get(&k.key)
+                        .map(|(c, t)| (*c, t.elapsed().as_secs()))
+                        .unwrap_or((0, 0))
+                };
                 KeyUsageStats {
                     key_name: k.name.clone(),
                     tenant_id: k.tenant_id.clone(),
@@ -119,6 +136,12 @@ impl ApiGateway {
 impl ApiGateway {
     /// Seconds until the current rate-limit window resets for a given key.
     pub fn retry_after(&self, bearer: &str) -> u64 {
+        if let Some(store) = &self.store {
+            if let Some((_c, elapsed)) = store.rate_snapshot(bearer) {
+                return if elapsed >= 60 { 0 } else { 60 - elapsed };
+            }
+            return 0;
+        }
         let state = self.rate_state.lock().unwrap();
         match state.get(bearer) {
             Some((_count, started)) => {
@@ -176,9 +199,69 @@ impl ApiKeyStore {
                 created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
                 updated_at       INTEGER NOT NULL DEFAULT (unixepoch())
             );
+
+            CREATE TABLE IF NOT EXISTS rate_state (
+                api_key          TEXT PRIMARY KEY,
+                count            INTEGER NOT NULL,
+                window_start     INTEGER NOT NULL
+            );
             "#,
         )
         .map_err(|e| e.to_string())
+    }
+
+    /// Atomically increment the per-key counter in the current 60s window and
+    /// return the new count. If the window has expired, resets it first. This
+    /// is the shared-state path used for distributed rate limiting.
+    pub fn incr_and_count(
+        &self,
+        api_key: &str,
+        window_secs: u64,
+    ) -> Result<(u32, u64), String> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+
+        let now: i64 = tx
+            .query_row("SELECT unixepoch()", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+
+        let existing: Option<(i64, i64)> = tx
+            .query_row(
+                "SELECT count, window_start FROM rate_state WHERE api_key = ?1",
+                params![api_key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+
+        let (new_count, window_start) = match existing {
+            Some((count, start)) if (now - start) < window_secs as i64 => {
+                (count as u32 + 1, start)
+            }
+            _ => (1, now),
+        };
+
+        tx.execute(
+            "INSERT INTO rate_state (api_key, count, window_start) VALUES (?1, ?2, ?3)
+             ON CONFLICT(api_key) DO UPDATE SET count = excluded.count, window_start = excluded.window_start",
+            params![api_key, new_count as i64, window_start],
+        )
+        .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok((new_count, (now - window_start) as u64))
+    }
+
+    /// Snapshot of current counters (for /usage).
+    pub fn rate_snapshot(&self, api_key: &str) -> Option<(u32, u64)> {
+        let conn = self.conn.lock().ok()?;
+        let row: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT count, (unixepoch() - window_start) FROM rate_state WHERE api_key = ?1",
+                params![api_key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        row.map(|(c, e)| (c as u32, e.max(0) as u64))
     }
 
     pub fn load_all(&self) -> Result<Vec<ApiKey>, String> {
@@ -327,6 +410,31 @@ mod tests {
         let keys = store.load_all().unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].tenant_id, "tenant-a");
+    }
+
+    #[test]
+    fn shared_rate_state_across_gateways() {
+        // Simulate two server nodes pointing at the same SQLite file by
+        // sharing an `ApiKeyStore`. The counter must be the same for both.
+        let store = Arc::new(ApiKeyStore::open_in_memory().unwrap());
+        store
+            .upsert(&ApiKey {
+                key: "shared".into(),
+                tenant_id: "tenant-a".into(),
+                name: "shared".into(),
+                rate_limit_rpm: 3,
+            })
+            .unwrap();
+
+        let g1 = ApiGateway::new().with_store(store.clone()).unwrap();
+        let g2 = ApiGateway::new().with_store(store.clone()).unwrap();
+
+        g1.authenticate("shared").unwrap();
+        g2.authenticate("shared").unwrap();
+        g1.authenticate("shared").unwrap();
+        // Fourth request crosses the limit regardless of which node serves it.
+        let err = g2.authenticate("shared").unwrap_err();
+        assert!(matches!(err, GatewayError::RateLimited));
     }
 
     #[test]

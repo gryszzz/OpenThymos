@@ -13,5 +13,6 @@ thiserror  = { workspace = true }
 hex        = { workspace = true }
 blake3     = { workspace = true }
 rusqlite   = { workspace = true }
+thymos-core = { path = "../thymos-core" }
 
 [dev-dependencies]

@@ -4,7 +4,9 @@
 //! canonical JSON so that the digest over a `WritBody` is deterministic and
 //! doesn't depend on serde_json's byte-array encoding.
 
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+pub use ed25519_dalek::{SigningKey, VerifyingKey};
+
+use ed25519_dalek::Signer;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Deserializer, Serializer};
 

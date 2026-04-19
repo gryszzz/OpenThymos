@@ -2,8 +2,10 @@
 
 import { useEffect, useState, useCallback, use } from "react";
 import {
+  branchFrom,
   getRun,
   getWorld,
+  getWorldAt,
   subscribeEntries,
   subscribeStream,
   type RunRecord,
@@ -26,6 +28,8 @@ export default function RunPage({
   const [streamEvents, setStreamEvents] = useState<CognitionEvent[]>([]);
   const [resources, setResources] = useState<ResourceDto[]>([]);
   const [tab, setTab] = useState<"timeline" | "stream" | "world">("timeline");
+  const [scrubSeq, setScrubSeq] = useState<number | null>(null);
+  const [branchMsg, setBranchMsg] = useState<string | null>(null);
 
   // Poll run status.
   useEffect(() => {
@@ -62,17 +66,43 @@ export default function RunPage({
     return () => es.close();
   }, [id]);
 
-  // Fetch world when run completes.
+  // Fetch world when run completes (or at a specific seq if scrubbing).
   const fetchWorld = useCallback(async () => {
     try {
-      const w = await getWorld(id);
-      setResources(w.resources ?? []);
+      if (scrubSeq !== null) {
+        const w = await getWorldAt(id, scrubSeq);
+        setResources(w.resources ?? []);
+      } else {
+        const w = await getWorld(id);
+        setResources(w.resources ?? []);
+      }
     } catch { /* not ready */ }
-  }, [id]);
+  }, [id, scrubSeq]);
+
+  const handleBranch = useCallback(
+    async (commitId: string) => {
+      try {
+        const res = await branchFrom(id, commitId, "shadow branch from viewer");
+        setBranchMsg(`Branched → ${res.branch_trajectory_id.slice(0, 12)}…`);
+      } catch (e) {
+        setBranchMsg(`Branch failed: ${(e as Error).message}`);
+      }
+    },
+    [id],
+  );
 
   useEffect(() => {
     if (run?.status === "completed") fetchWorld();
   }, [run?.status, fetchWorld]);
+
+  // Refetch world when the scrubber moves while on the world tab.
+  useEffect(() => {
+    if (tab === "world") fetchWorld();
+  }, [scrubSeq, tab, fetchWorld]);
+
+  const commitEntries = entries.filter((e) => e.kind === "commit");
+  const maxSeq = entries.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
+  const currentScrubSeq = scrubSeq ?? maxSeq;
 
   const statusColor =
     run?.status === "completed"
@@ -154,6 +184,95 @@ export default function RunPage({
           }}
         >
           <strong>Final Answer:</strong> {run.summary.final_answer}
+        </div>
+      )}
+
+      {/* Scrubber: replay the world up to any commit. */}
+      {maxSeq > 0 && (
+        <div
+          style={{
+            marginBottom: 16,
+            padding: "10px 14px",
+            background: "#0f172a",
+            border: "1px solid #1e293b",
+            borderRadius: 8,
+            display: "flex",
+            gap: 12,
+            alignItems: "center",
+            fontSize: 12,
+          }}
+        >
+          <span style={{ color: "#94a3b8", minWidth: 80 }}>
+            Replay to seq
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={maxSeq}
+            value={currentScrubSeq}
+            onChange={(e) => setScrubSeq(Number(e.target.value))}
+            style={{ flex: 1 }}
+            aria-label="Trajectory scrubber"
+          />
+          <span style={{ color: "#e2e8f0", minWidth: 60, textAlign: "right" }}>
+            {currentScrubSeq} / {maxSeq}
+          </span>
+          {scrubSeq !== null && scrubSeq !== maxSeq && (
+            <button
+              onClick={() => setScrubSeq(null)}
+              style={{
+                background: "none",
+                border: "1px solid #334155",
+                color: "#cbd5e1",
+                padding: "3px 8px",
+                borderRadius: 4,
+                cursor: "pointer",
+                fontSize: 11,
+              }}
+            >
+              jump to head
+            </button>
+          )}
+          {(() => {
+            const commitAtSeq = commitEntries.find(
+              (e) => e.seq === currentScrubSeq,
+            );
+            const commitId = commitAtSeq?.commit_id;
+            if (!commitId) return null;
+            return (
+              <button
+                onClick={() => handleBranch(commitId)}
+                style={{
+                  background: "#4338ca",
+                  border: "1px solid #6366f1",
+                  color: "#e0e7ff",
+                  padding: "3px 10px",
+                  borderRadius: 4,
+                  cursor: "pointer",
+                  fontSize: 11,
+                  fontWeight: 600,
+                }}
+              >
+                branch from here
+              </button>
+            );
+          })()}
+        </div>
+      )}
+
+      {branchMsg && (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: "8px 12px",
+            background: "#1e293b",
+            border: "1px solid #334155",
+            borderRadius: 6,
+            fontSize: 12,
+            color: "#cbd5e1",
+          }}
+        >
+          {branchMsg}
         </div>
       )}
 
