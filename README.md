@@ -2,7 +2,7 @@
 
 <img src="thymos/Thymos-logo.PNG" alt="Thymos" width="128" height="128" />
 
-# THYMOS
+# 𝓣𝓱𝔂𝓶𝓸𝓼
 
 **A Rust runtime for governed LLM agents.**
 
