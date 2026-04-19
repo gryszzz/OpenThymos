@@ -183,3 +183,79 @@ exit
     server.abort();
     let _ = server.await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shell_preset_and_workspace_wire_up() {
+    let workspace = tempdir_with_git();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+    let url = format!("http://{addr}");
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app(test_state()))
+            .await
+            .expect("serve thymos app");
+    });
+
+    let ws = workspace.to_string_lossy();
+    let script = format!(
+        "set preset code
+set workspace {ws}
+remember prefers rust, idiomatic code only
+show
+exit
+"
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_thymos"))
+        .args(["--url", &url, "shell"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn thymos shell");
+
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        stdin.write_all(script.as_bytes()).expect("write script");
+    }
+
+    let output = child.wait_with_output().expect("wait shell");
+    let out = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "shell exited non-zero:\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(out.contains("preset        coding"), "preset missing: {out}");
+    assert!(
+        out.contains("max_steps     64"),
+        "preset did not bump max_steps: {out}"
+    );
+    assert!(out.contains("fs_patch"), "coding scopes missing: {out}");
+    assert!(
+        out.contains(workspace.to_str().unwrap()),
+        "workspace path missing: {out}"
+    );
+
+    let mem = std::fs::read_to_string(workspace.join(".thymos").join("memory.md"))
+        .expect("memory.md should be written by remember");
+    assert!(mem.contains("prefers rust"), "memory contents: {mem}");
+
+    server.abort();
+    let _ = server.await;
+}
+
+fn tempdir_with_git() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("thymos-shell-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir tempdir");
+    std::fs::create_dir_all(dir.join("src")).expect("mkdir src");
+    std::fs::write(dir.join("README.md"), "test repo").expect("write readme");
+    // `git status` runs but the dir doesn't need to be a real repo; any stderr
+    // is swallowed by the preamble builder.
+    dir
+}

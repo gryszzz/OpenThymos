@@ -1535,10 +1535,16 @@ fn entry_to_dto(e: &thymos_ledger::Entry) -> EntryDto {
             }),
         ),
         EntryPayload::PendingApproval {
-            channel, reason, ..
+            channel,
+            reason,
+            proposal,
         } => (
             "pending_approval".into(),
-            serde_json::json!({ "channel": channel, "reason": reason }),
+            serde_json::json!({
+                "channel": channel,
+                "reason": reason,
+                "proposal": serde_json::to_value(proposal).ok(),
+            }),
         ),
         EntryPayload::Delegation {
             child_trajectory_id,

@@ -3,7 +3,10 @@
 //! `auto` autonomous loop that prompts inline for approvals.
 
 use std::collections::HashSet;
+use std::fs;
 use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -24,6 +27,12 @@ struct ShellState {
     /// "approve", or "deny".
     auto_approve: ApprovePolicy,
     last_run_id: Option<String>,
+    /// Repo root for workspace-aware `run` / `auto`. When set, a preamble
+    /// (git status + top-level entries + project memory) is prepended to the
+    /// task, and `remember` appends to `{workspace}/.thymos/memory.md`.
+    workspace: Option<PathBuf>,
+    /// Label of the last-applied preset (for display only).
+    preset: &'static str,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,6 +62,8 @@ impl ShellState {
             follow: false,
             auto_approve: ApprovePolicy::Prompt,
             last_run_id: None,
+            workspace: None,
+            preset: "default",
         }
     }
 
@@ -213,11 +224,12 @@ async fn dispatch(
         }
         "run" => {
             let parsed = parse_run_args(&args, state)?;
+            let full_task = compose_task(&parsed.task, state.workspace.as_deref());
             let run_id = start_run(
                 client,
                 url,
                 api_key,
-                &parsed.task,
+                &full_task,
                 parsed.max_steps,
                 &parsed.provider,
                 parsed.model.as_deref(),
@@ -228,6 +240,9 @@ async fn dispatch(
             println!("Run started: {run_id}");
             println!("  task: {}", parsed.task);
             println!("  provider: {}", parsed.provider);
+            if state.workspace.is_some() {
+                println!("  workspace: {}", state.workspace.as_ref().unwrap().display());
+            }
             if parsed.follow {
                 println!("--- streaming ---");
                 cmd_stream(url, &run_id).await?;
@@ -236,11 +251,12 @@ async fn dispatch(
         }
         "auto" => {
             let parsed = parse_run_args(&args, state)?;
+            let full_task = compose_task(&parsed.task, state.workspace.as_deref());
             let run_id = start_run(
                 client,
                 url,
                 api_key,
-                &parsed.task,
+                &full_task,
                 parsed.max_steps,
                 &parsed.provider,
                 parsed.model.as_deref(),
@@ -250,6 +266,7 @@ async fn dispatch(
             state.last_run_id = Some(run_id.clone());
             auto_loop(client, url, api_key, &run_id, state).await?;
         }
+        "remember" => remember(state, &args)?,
         "runs" => {
             let sub = require_arg(&args, 0, "runs <ls|show|diff> ...")?;
             match sub {
@@ -410,9 +427,64 @@ fn set_value(state: &mut ShellState, args: &[&str]) -> Result<(), String> {
                 _ => return Err(format!("auto_approve: expected prompt|approve|deny, got {value}")),
             }
         }
+        "workspace" => {
+            if value == "none" {
+                state.workspace = None;
+            } else {
+                let path = PathBuf::from(value);
+                let canon = path
+                    .canonicalize()
+                    .map_err(|e| format!("workspace {value}: {e}"))?;
+                if !canon.is_dir() {
+                    return Err(format!("workspace {value}: not a directory"));
+                }
+                state.workspace = Some(canon);
+            }
+        }
+        "preset" => match value {
+            "code" | "coding" => {
+                state.max_steps = 64;
+                state.scopes = Some(
+                    "fs_read,fs_patch,list_files,repo_map,grep,test_run,memory_store,memory_recall"
+                        .into(),
+                );
+                state.preset = "coding";
+            }
+            "default" => {
+                state.max_steps = 16;
+                state.scopes = None;
+                state.preset = "default";
+            }
+            _ => return Err(format!("unknown preset: {value} (try code|default)")),
+        },
         other => return Err(format!("unknown setting: {other}")),
     }
     println!("ok");
+    Ok(())
+}
+
+fn remember(state: &ShellState, args: &[&str]) -> Result<(), String> {
+    let ws = state
+        .workspace
+        .as_ref()
+        .ok_or("remember needs a workspace — `set workspace <path>` first")?;
+    if args.is_empty() {
+        return Err("usage: remember <text>".into());
+    }
+    let text = args.join(" ");
+    let dir = ws.join(".thymos");
+    fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join("memory.md");
+    let line = format!("- {}\n", text);
+    use std::fs::OpenOptions;
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?
+        .write_all(line.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    println!("remembered → {}", path.display());
     Ok(())
 }
 
@@ -437,6 +509,15 @@ fn print_state(state: &ShellState) {
     );
     println!("follow        {}", state.follow);
     println!("auto_approve  {}", state.auto_approve.as_str());
+    println!("preset        {}", state.preset);
+    println!(
+        "workspace     {}",
+        state
+            .workspace
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".into())
+    );
     println!(
         "last_run_id   {}",
         state.last_run_id.as_deref().unwrap_or("(none)")
@@ -460,7 +541,11 @@ Thymos shell commands:
   runs diff <a> <b>
   health                        GET /health
   usage                         GET /usage
-  set <key> <value>             provider|model|max_steps|scopes|follow|auto_approve
+  set <key> <value>             provider|model|max_steps|scopes|follow|auto_approve|
+                                 workspace|preset
+  preset code                   max_steps=64, coding toolkit scopes
+  workspace <path>              repo root; enables preamble + .thymos/memory.md
+  remember <text>               append note to {{workspace}}/.thymos/memory.md
   show                          print session defaults + last run id
   help                          this message
   exit | quit                   leave the shell
@@ -468,6 +553,73 @@ Thymos shell commands:
 Tokens: `$last` expands to the most recent run id.
 Lines starting with `#` are comments."
     );
+}
+
+/// Build the final task string sent to the server. When a workspace is set,
+/// prepend a preamble with git status, top-level listing, and any
+/// `.thymos/memory.md` content so the agent starts grounded.
+fn compose_task(task: &str, workspace: Option<&Path>) -> String {
+    match workspace {
+        None => task.to_string(),
+        Some(ws) => format!("{}\n\n## Task\n{task}", workspace_preamble(ws)),
+    }
+}
+
+fn workspace_preamble(ws: &Path) -> String {
+    let mut out = String::new();
+    out.push_str("## Workspace\n\n");
+    out.push_str(&format!("Repo root: `{}`\n", ws.display()));
+
+    if let Ok(output) = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(ws)
+        .args(["status", "--short", "--branch"])
+        .output()
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                out.push_str("\n### git status\n```\n");
+                out.push_str(trimmed);
+                out.push_str("\n```\n");
+            }
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(ws) {
+        let mut names: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    format!("{name}/")
+                } else {
+                    name
+                }
+            })
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        names.sort();
+        names.truncate(40);
+        if !names.is_empty() {
+            out.push_str("\n### top-level\n");
+            out.push_str(&names.join(", "));
+            out.push('\n');
+        }
+    }
+
+    let mem = ws.join(".thymos").join("memory.md");
+    if let Ok(content) = fs::read_to_string(&mem) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            out.push_str("\n### project memory\n");
+            out.push_str(trimmed);
+            out.push('\n');
+        }
+    }
+
+    out
 }
 
 fn history_path() -> Option<std::path::PathBuf> {
@@ -508,10 +660,10 @@ async fn auto_loop(
             let detail = &entry["detail"];
             let channel = detail["channel"].as_str().unwrap_or("?");
             let reason = detail["reason"].as_str().unwrap_or("(no reason)");
-            let decision = resolve_approval(state, channel, reason);
+            let review = render_review(channel, reason, detail.get("proposal"));
+            let decision = resolve_approval(state, &review);
             match decision {
                 ApprovalDecision::Skip => {
-                    // Prompt mode but no TTY — bail out so we don't hang forever.
                     return Err(format!(
                         "pending approval on channel `{channel}` (reason: {reason}) and no interactive TTY — set auto_approve approve|deny or re-run in a TTY"
                     ));
@@ -538,7 +690,7 @@ enum ApprovalDecision {
     Skip,
 }
 
-fn resolve_approval(state: &ShellState, channel: &str, reason: &str) -> ApprovalDecision {
+fn resolve_approval(state: &ShellState, review: &str) -> ApprovalDecision {
     match state.auto_approve {
         ApprovePolicy::Approve => ApprovalDecision::Approve,
         ApprovePolicy::Deny => ApprovalDecision::Deny,
@@ -546,7 +698,8 @@ fn resolve_approval(state: &ShellState, channel: &str, reason: &str) -> Approval
             if !io::stdin().is_terminal() {
                 return ApprovalDecision::Skip;
             }
-            print!("[auto] approval needed — channel={channel} reason={reason}\n  approve? [y/N] ");
+            println!("{review}");
+            print!("  approve? [y/N] ");
             let _ = io::stdout().flush();
             let mut line = String::new();
             match io::stdin().read_line(&mut line) {
@@ -562,6 +715,57 @@ fn resolve_approval(state: &ShellState, channel: &str, reason: &str) -> Approval
             }
         }
     }
+}
+
+/// Render a human-readable review block for a pending proposal. Uses the
+/// proposal detail surfaced by /audit/entries (tool name + args) to show
+/// *what* the agent is about to do, not just the policy reason.
+fn render_review(channel: &str, reason: &str, proposal: Option<&Value>) -> String {
+    let mut out = String::new();
+    out.push_str("\n──────── Approval Required ────────\n");
+    out.push_str(&format!("channel  {channel}\n"));
+    out.push_str(&format!("reason   {reason}\n"));
+
+    if let Some(p) = proposal.and_then(|v| v.get("body")) {
+        let tool = p["plan"]["tool"].as_str().unwrap_or("?");
+        let args = &p["plan"]["args"];
+        out.push_str(&format!("tool     {tool}\n"));
+
+        // Summarise common coding-tool args succinctly.
+        match tool {
+            "fs_patch" => {
+                let path = args["path"].as_str().unwrap_or("?");
+                let mode = args["mode"].as_str().unwrap_or("?");
+                out.push_str(&format!("path     {path}\n"));
+                out.push_str(&format!("mode     {mode}\n"));
+                if mode == "replace" {
+                    let anchor = args["anchor"].as_str().unwrap_or("").lines().count();
+                    let replace = args["replacement"].as_str().unwrap_or("").lines().count();
+                    out.push_str(&format!("diff     -{anchor} +{replace} lines\n"));
+                } else if let Some(content) = args["content"].as_str() {
+                    out.push_str(&format!("write    {} bytes\n", content.len()));
+                }
+            }
+            "test_run" | "shell" => {
+                if let Some(cmd) = args["command"].as_str() {
+                    out.push_str(&format!("command  {cmd}\n"));
+                }
+                if let Some(runner) = args["runner"].as_str() {
+                    out.push_str(&format!("runner   {runner}\n"));
+                }
+            }
+            _ => {
+                let pretty =
+                    serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
+                out.push_str("args\n");
+                for line in pretty.lines() {
+                    out.push_str(&format!("  {line}\n"));
+                }
+            }
+        }
+    }
+    out.push_str("───────────────────────────────────");
+    out
 }
 
 async fn fetch_status(
