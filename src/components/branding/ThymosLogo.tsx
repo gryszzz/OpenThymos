@@ -1,3 +1,5 @@
+import { siteConfig } from "@/lib/site";
+
 type ThymosLogoProps = {
   className?: string;
   wordmark?: boolean;
@@ -13,7 +15,7 @@ export function ThymosLogo({
     <div className={className ? `thymos-logo ${className}` : "thymos-logo"}>
       <img
         className="thymos-mark"
-        src="/thymos-mark.png"
+        src={`${siteConfig.basePath}/thymos-mark.png`}
         alt=""
         aria-hidden="true"
         width={1024}
@@ -26,7 +28,7 @@ export function ThymosLogo({
       {wordmark ? (
         <span className="thymos-wordmark">
           <strong>THYMOS</strong>
-          <span>governed ai runtime</span>
+          <span>governed execution runtime</span>
         </span>
       ) : null}
     </div>

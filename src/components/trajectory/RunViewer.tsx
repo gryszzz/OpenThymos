@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, use } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   branchFrom,
   getRun,
@@ -8,21 +8,16 @@ import {
   getWorldAt,
   subscribeEntries,
   subscribeStream,
-  type RunRecord,
+  type CognitionEvent,
   type EntryDto,
   type ResourceDto,
-  type CognitionEvent,
+  type RunRecord,
 } from "@/lib/thymos-api";
 import { EntryTimeline } from "@/components/trajectory/EntryTimeline";
 import { StreamView } from "@/components/trajectory/StreamView";
 import { WorldView } from "@/components/trajectory/WorldView";
 
-export default function RunPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const { id } = use(params);
+export function RunViewer({ id }: { id: string }) {
   const [run, setRun] = useState<RunRecord | null>(null);
   const [entries, setEntries] = useState<EntryDto[]>([]);
   const [streamEvents, setStreamEvents] = useState<CognitionEvent[]>([]);
@@ -31,7 +26,6 @@ export default function RunPage({
   const [scrubSeq, setScrubSeq] = useState<number | null>(null);
   const [branchMsg, setBranchMsg] = useState<string | null>(null);
 
-  // Poll run status.
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -40,33 +34,28 @@ export default function RunPage({
           const r = await getRun(id);
           setRun(r);
           if (r.status !== "running") break;
-        } catch { /* retry */ }
+        } catch {
+          // retry
+        }
         await new Promise((r) => setTimeout(r, 1000));
       }
     };
     poll();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [id]);
 
-  // SSE: ledger entries.
   useEffect(() => {
-    const es = subscribeEntries(
-      id,
-      (entry) => setEntries((prev) => [...prev, entry]),
-    );
+    const es = subscribeEntries(id, (entry) => setEntries((prev) => [...prev, entry]));
     return () => es.close();
   }, [id]);
 
-  // SSE: cognition stream.
   useEffect(() => {
-    const es = subscribeStream(
-      id,
-      (evt) => setStreamEvents((prev) => [...prev, evt]),
-    );
+    const es = subscribeStream(id, (evt) => setStreamEvents((prev) => [...prev, evt]));
     return () => es.close();
   }, [id]);
 
-  // Fetch world when run completes (or at a specific seq if scrubbing).
   const fetchWorld = useCallback(async () => {
     try {
       if (scrubSeq !== null) {
@@ -76,14 +65,16 @@ export default function RunPage({
         const w = await getWorld(id);
         setResources(w.resources ?? []);
       }
-    } catch { /* not ready */ }
+    } catch {
+      // not ready
+    }
   }, [id, scrubSeq]);
 
   const handleBranch = useCallback(
     async (commitId: string) => {
       try {
         const res = await branchFrom(id, commitId, "shadow branch from viewer");
-        setBranchMsg(`Branched → ${res.branch_trajectory_id.slice(0, 12)}…`);
+        setBranchMsg(`Branched -> ${res.branch_trajectory_id.slice(0, 12)}...`);
       } catch (e) {
         setBranchMsg(`Branch failed: ${(e as Error).message}`);
       }
@@ -95,7 +86,6 @@ export default function RunPage({
     if (run?.status === "completed") fetchWorld();
   }, [run?.status, fetchWorld]);
 
-  // Refetch world when the scrubber moves while on the world tab.
   useEffect(() => {
     if (tab === "world") fetchWorld();
   }, [scrubSeq, tab, fetchWorld]);
@@ -136,7 +126,6 @@ export default function RunPage({
         Run <code style={{ color: "#a1a1aa" }}>{id.slice(0, 12)}...</code>
       </p>
 
-      {/* Status bar */}
       <div
         style={{
           display: "flex",
@@ -160,9 +149,7 @@ export default function RunPage({
         <span style={{ fontWeight: 600, textTransform: "capitalize" }}>
           {run?.status ?? "loading"}
         </span>
-        {run?.task && (
-          <span style={{ color: "#a1a1aa", flex: 1 }}>{run.task}</span>
-        )}
+        {run?.task && <span style={{ color: "#a1a1aa", flex: 1 }}>{run.task}</span>}
         {run?.summary && (
           <span style={{ color: "#71717a", fontSize: 12 }}>
             {run.summary.steps_executed} steps, {run.summary.commits} commits,{" "}
@@ -171,7 +158,6 @@ export default function RunPage({
         )}
       </div>
 
-      {/* Final answer */}
       {run?.summary?.final_answer && (
         <div
           style={{
@@ -187,7 +173,6 @@ export default function RunPage({
         </div>
       )}
 
-      {/* Scrubber: replay the world up to any commit. */}
       {maxSeq > 0 && (
         <div
           style={{
@@ -202,9 +187,7 @@ export default function RunPage({
             fontSize: 12,
           }}
         >
-          <span style={{ color: "#94a3b8", minWidth: 80 }}>
-            Replay to seq
-          </span>
+          <span style={{ color: "#94a3b8", minWidth: 80 }}>Replay to seq</span>
           <input
             type="range"
             min={0}
@@ -234,9 +217,7 @@ export default function RunPage({
             </button>
           )}
           {(() => {
-            const commitAtSeq = commitEntries.find(
-              (e) => e.seq === currentScrubSeq,
-            );
+            const commitAtSeq = commitEntries.find((e) => e.seq === currentScrubSeq);
             const commitId = commitAtSeq?.commit_id;
             if (!commitId) return null;
             return (
@@ -276,7 +257,6 @@ export default function RunPage({
         </div>
       )}
 
-      {/* Tabs */}
       <div
         style={{
           display: "flex",
@@ -322,7 +302,6 @@ export default function RunPage({
         ))}
       </div>
 
-      {/* Tab content */}
       {tab === "timeline" && <EntryTimeline entries={entries} />}
       {tab === "stream" && <StreamView events={streamEvents} />}
       {tab === "world" && <WorldView resources={resources} />}

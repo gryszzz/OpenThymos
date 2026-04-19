@@ -1,15 +1,23 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import { RunViewer } from "@/components/trajectory/RunViewer";
 import { createRun } from "@/lib/thymos-api";
 
 export default function RunsPage() {
   const router = useRouter();
+  const [runId, setRunId] = useState<string | null>(null);
   const [task, setTask] = useState("");
   const [maxSteps, setMaxSteps] = useState(16);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const id = new URLSearchParams(window.location.search).get("id");
+    setRunId(id);
+  }, []);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -18,11 +26,15 @@ export default function RunsPage() {
     setError(null);
     try {
       const res = await createRun(task, maxSteps);
-      router.push(`/runs/${res.run_id}`);
+      router.push(`/runs?id=${encodeURIComponent(res.run_id)}`);
     } catch (err) {
       setError(String(err));
       setLoading(false);
     }
+  }
+
+  if (runId) {
+    return <RunViewer id={runId} />;
   }
 
   return (

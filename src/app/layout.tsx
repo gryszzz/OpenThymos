@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
 import type { Metadata } from "next";
-import { Manrope, Space_Grotesk } from "next/font/google";
+import { IBM_Plex_Sans, Space_Grotesk } from "next/font/google";
 import { siteConfig } from "@/lib/site";
 import "./globals.css";
 
-const bodyFont = Manrope({
+const bodyFont = IBM_Plex_Sans({
   subsets: ["latin"],
   variable: "--font-body",
+  weight: ["400", "500", "600", "700"],
 });
 
 const displayFont = Space_Grotesk({
@@ -15,15 +16,17 @@ const displayFont = Space_Grotesk({
 });
 
 export const metadata: Metadata = {
-  title: `${siteConfig.name} | Rust AI Framework`,
+  title: `${siteConfig.name} | Governed Execution Runtime`,
   description: siteConfig.subheadline,
   icons: {
     icon: [
-      { url: "/favicon.ico", sizes: "any" },
-      { url: "/icon.png", type: "image/png" },
+      { url: `${siteConfig.basePath}/favicon.ico`, sizes: "any" },
+      { url: `${siteConfig.basePath}/icon.png`, type: "image/png" },
     ],
-    apple: [{ url: "/apple-icon.png", sizes: "180x180", type: "image/png" }],
-    shortcut: ["/favicon.ico"],
+    apple: [
+      { url: `${siteConfig.basePath}/apple-icon.png`, sizes: "180x180", type: "image/png" },
+    ],
+    shortcut: [`${siteConfig.basePath}/favicon.ico`],
   },
 };
 

@@ -1,114 +1,153 @@
 import { ThymosLogo } from "@/components/branding/ThymosLogo";
 import { siteConfig } from "@/lib/site";
 
-const trustItems = ["rust", "ed25519 writs", "sqlite ledger", "pre-alpha"];
-const heroParticles = Array.from({ length: 14 }, (_, index) => index);
+const proofItems = [
+  "Signed authority",
+  "Policy-gated execution",
+  "Typed tools",
+  "Trajectory ledger",
+  "Local or hosted backends",
+  "Replayable runs",
+];
 
-const frameworkCards = [
+const runtimeNotes = [
   {
-    label: "Core",
-    title: "Typed primitives.",
-    body: "Writ, Intent, Proposal, Commit, Delta, World. Content-addressed via BLAKE3.",
+    label: "Execution kernel",
+    title: "Models do not own effects.",
+    body: "OpenThymos treats cognition as a bounded proposer. Runtime, policy, and ledger own the decision surface.",
   },
   {
-    label: "Writs",
-    title: "Signed capabilities.",
-    body: "Ed25519-signed tokens bound to tool scopes, budget, effect class, and time window.",
+    label: "Authority",
+    title: "Every action carries a signed writ.",
+    body: "Tool scopes, budget, effect class, and time window are enforced before the outside world changes.",
   },
   {
-    label: "Ledger",
-    title: "Append-only, replayable.",
-    body: "SQLite-backed, parent-chained. World state is projected by folding the chain.",
-  },
-  {
-    label: "Policy",
-    title: "Decide before effect.",
-    body: "Allow, deny, or suspend for human approval — evaluated before any commit is written.",
-  },
-  {
-    label: "Tools",
-    title: "Contract-based effects.",
-    body: "Schema, effect class, pre/postconditions, cost estimate. KV, memory, shell, HTTP, delegate, MCP bridge ship in-box.",
-  },
-  {
-    label: "Cognition",
-    title: "Multi-provider adapters.",
-    body: "Anthropic (with prompt caching + extended thinking), OpenAI, local OpenAI-compatible endpoints, deterministic mock.",
+    label: "History",
+    title: "The trajectory is the record.",
+    body: "Commits are content-addressed, parent-chained, and replayable. World state is projected from the ledger.",
   },
 ];
 
-const architectureCards = [
+const mechanismStages = [
   {
     step: "01",
     title: "Intent",
-    body: "The model emits a typed intent. Intents are inert — they never mutate state.",
+    body: "The model declares a typed action request with rationale. No side effects happen here.",
   },
   {
     step: "02",
     title: "Proposal",
-    body: "The compiler resolves the writ, typechecks, runs policy, and checks the budget.",
+    body: "Compiler, policy, and writ checks resolve authority, budget, and risk before execution is staged.",
   },
   {
     step: "03",
     title: "Commit",
-    body: "The runtime invokes the tool contract, verifies postconditions, and signs the outcome.",
-  },
-  {
-    step: "04",
-    title: "Ledger",
-    body: "The commit is appended, content-addressed, and parent-chained to the trajectory.",
+    body: "The runtime executes the tool contract, verifies the result, and appends the signed outcome to the ledger.",
   },
 ];
 
-const crateList = [
-  "thymos-core",
-  "thymos-ledger",
-  "thymos-policy",
-  "thymos-tools",
-  "thymos-compiler",
-  "thymos-cognition",
-  "thymos-runtime",
-  "thymos-server",
-  "thymos-cli",
-  "thymos-client",
+const pillarCards = [
+  {
+    label: "Bounded authority",
+    title: "Ed25519 writs define what the agent may do.",
+    body: "Authority is explicit, scoped, signed, and time-bound instead of implied by the prompt.",
+  },
+  {
+    label: "Ledger-backed execution",
+    title: "Every allowed, denied, and suspended step is durable.",
+    body: "The audit trail is not an afterthought. It is the runtime's source of truth.",
+  },
+  {
+    label: "Typed coding actions",
+    title: "Repo operations are contracts, not free-form tool blobs.",
+    body: "Read, patch, grep, map, and test actions are typed, path-confined, and observable.",
+  },
+  {
+    label: "Multi-provider cognition",
+    title: "Hosted or local models plug into the same governed loop.",
+    body: "Anthropic, OpenAI, Hugging Face, LM Studio, local OpenAI-compatible endpoints, and mock runs share one control plane.",
+  },
+  {
+    label: "Secure tool fabric",
+    title: "Risky execution crosses a worker boundary.",
+    body: "Shell and HTTP calls move through the hardened tool fabric with receipts and capability profiles.",
+  },
+  {
+    label: "Replayable trajectories",
+    title: "You can inspect what happened, not guess.",
+    body: "Runs stream live and can be replayed later to reconstruct the same trajectory and world projection.",
+  },
 ];
 
-const provenanceCards = [
+const codingTools = [
+  ["repo_map", "Read", "top-level layout and workspace markers"],
+  ["list_files", "Read", "bounded directory walk"],
+  ["fs_read", "Read", "file reads with byte and line limits"],
+  ["grep", "Read", "substring scan with filters"],
+  ["fs_patch", "Write", "typed replace or overwrite patch mode"],
+  ["test_run", "External", "suite execution with auto-detected toolchain"],
+];
+
+const providerGroups = [
   {
-    label: "Authorization",
-    title: "Every mutation is bound to a Writ.",
-    body: "No Writ, no commit. Child Writs can only be subsets of their parent — delegation is bounded by construction.",
+    label: "Local sovereignty",
+    title: "LM Studio, Ollama, vLLM, and OpenAI-compatible local endpoints.",
+    body: "Keep sensitive repositories on your machine while still running the same typed, ledgered execution pipeline.",
+    chips: ["LM Studio", "OpenAI-compatible local", "Ollama", "vLLM"],
   },
   {
-    label: "Replay",
-    title: "World is a fold of the ledger.",
-    body: "Resource state is never stored separately. You can reconstruct exactly what the agent saw at any commit.",
+    label: "Hosted cognition",
+    title: "Anthropic, OpenAI, Hugging Face, and mock runs.",
+    body: "Swap cognition providers without rewriting the runtime contract. Policy, tools, and history stay consistent.",
+    chips: ["Anthropic", "OpenAI", "Hugging Face", "Mock"],
+  },
+];
+
+const workflowColumns = [
+  {
+    title: "Developer loop",
+    items: [
+      "Inspect the repo with typed read tools.",
+      "Propose targeted file patches instead of opaque diffs.",
+      "Run tests through the same governed execution path.",
+      "Review the full trajectory before merging.",
+    ],
   },
   {
-    label: "Streaming",
-    title: "Token-level observability.",
-    body: "The HTTP server emits both cognition tokens and ledger entries as SSE, so every step is auditable live.",
+    title: "Operator control",
+    items: [
+      "Issue writs with bounded scopes and budgets.",
+      "Apply policy gates before execution commits.",
+      "Route shell and HTTP through the secure worker fabric.",
+      "Replay or audit every run from the ledger.",
+    ],
   },
+];
+
+const launchNotes = [
+  "Pre-alpha open runtime",
+  "Coding-agent surface ships now",
+  "Worker-backed secure tool fabric",
+  "Live run and ledger streaming",
 ];
 
 export function ThymosLanding() {
   return (
     <main className="thymos-page">
-      <div className="thymos-backdrop thymos-backdrop-a" />
-      <div className="thymos-backdrop thymos-backdrop-b" />
-      <div className="thymos-backdrop thymos-backdrop-c" />
-      <div className="thymos-noise" />
+      <div className="thymos-grid-haze" aria-hidden="true" />
+      <div className="thymos-radial-signal thymos-radial-signal-a" aria-hidden="true" />
+      <div className="thymos-radial-signal thymos-radial-signal-b" aria-hidden="true" />
 
       <div className="thymos-shell">
         <header className="thymos-header thymos-reveal">
-          <ThymosLogo />
+          <ThymosLogo priority />
 
           <nav className="thymos-nav" aria-label="Primary">
-            <a href="#overview">Overview</a>
-            <a href="#framework">Framework</a>
-            <a href="#flow">Flow</a>
-            <a href="#quickstart">Quickstart</a>
-            <a href="#status">Status</a>
+            <a href="#runtime">Runtime</a>
+            <a href="#mechanism">How it works</a>
+            <a href="#coding-agent">Coding agent</a>
+            <a href="#backends">Backends</a>
+            <a href="#workflow">Workflow</a>
           </nav>
 
           <a
@@ -121,101 +160,199 @@ export function ThymosLanding() {
           </a>
         </header>
 
-        <section className="thymos-hero" id="overview">
+        <section className="thymos-hero" id="top">
           <div className="thymos-hero-copy">
             <div className="thymos-pill thymos-reveal thymos-delay-1">
               <span className="thymos-pill-dot" />
-              Pre-alpha · Rust workspace
+              Governed execution runtime
             </div>
 
-            <h1 className="thymos-reveal thymos-delay-2">{siteConfig.tagline}</h1>
-            <p className="thymos-reveal thymos-delay-3">{siteConfig.headline}</p>
+            <h1 className="thymos-reveal thymos-delay-2">{siteConfig.headline}</h1>
+            <p className="thymos-hero-lede thymos-reveal thymos-delay-3">{siteConfig.tagline}</p>
             <p className="thymos-hero-subcopy thymos-reveal thymos-delay-4">
               {siteConfig.subheadline}
             </p>
 
             <div className="thymos-hero-actions thymos-reveal thymos-delay-5">
-              <a className="thymos-primary-action" href="#quickstart">
-                Run the demo
-              </a>
               <a
-                className="thymos-secondary-action"
+                className="thymos-primary-action"
                 href={siteConfig.githubUrl}
                 target="_blank"
                 rel="noreferrer"
               >
-                View source
+                View the repo
+              </a>
+              <a className="thymos-secondary-action" href="#mechanism">
+                See the execution model
               </a>
             </div>
 
-            <div className="thymos-trust-row thymos-reveal thymos-delay-6">
-              {trustItems.map((item) => (
-                <span className="thymos-trust-chip" key={item}>
+            <div className="thymos-launch-notes thymos-reveal thymos-delay-6">
+              {launchNotes.map((item) => (
+                <span className="thymos-launch-chip" key={item}>
                   {item}
                 </span>
               ))}
             </div>
           </div>
 
-          <div className="thymos-hero-art thymos-reveal thymos-delay-2">
-            <div className="thymos-aurora-shell" />
-            <div className="thymos-light-column thymos-light-column-a" />
-            <div className="thymos-light-column thymos-light-column-b" />
-            <div className="thymos-stage-floor" />
-            <div className="thymos-particle-field" aria-hidden="true">
-              {heroParticles.map((particle) => (
-                <span className="thymos-particle" key={particle} />
-              ))}
-            </div>
-            <div className="thymos-orbit thymos-orbit-a" />
-            <div className="thymos-orbit thymos-orbit-b" />
-
-            <div className="thymos-core-panel">
-              <div className="thymos-core-glow" />
-              <div className="thymos-core-screen">
-                <div className="thymos-screen-topline">
-                  <span>thymos.runtime</span>
-                  <span>trajectory ledger</span>
+          <div className="thymos-hero-visual thymos-reveal thymos-delay-3" aria-hidden="true">
+            <div className="thymos-visual-stack">
+              <div className="thymos-runtime-stage">
+                <div className="thymos-stage-topline">
+                  <span>open thymos / governed runtime</span>
+                  <span>trajectory active</span>
                 </div>
 
-                <div className="thymos-screen-meters">
-                  <span />
-                  <span />
-                  <span />
+                <div className="thymos-stage-graph">
+                  <article className="thymos-stage-node">
+                    <span className="thymos-stage-label">Intent</span>
+                    <strong>inspect crates/thymos-ledger</strong>
+                    <p>Model proposes typed coding action.</p>
+                  </article>
+                  <span className="thymos-stage-link" />
+                  <article className="thymos-stage-node">
+                    <span className="thymos-stage-label">Policy</span>
+                    <strong>allow under coding.writ.local</strong>
+                    <p>Scope, budget, and path checks succeed.</p>
+                  </article>
+                  <span className="thymos-stage-link" />
+                  <article className="thymos-stage-node">
+                    <span className="thymos-stage-label">Commit</span>
+                    <strong>ledger entry #000184</strong>
+                    <p>Observation signed and appended.</p>
+                  </article>
+                </div>
+
+                <div className="thymos-stage-console">
+                  <div className="thymos-console-line">
+                    <span>provider</span>
+                    <strong>lmstudio / qwen2.5-coder</strong>
+                  </div>
+                  <div className="thymos-console-line">
+                    <span>tool</span>
+                    <strong>repo_map -&gt; fs_read -&gt; grep -&gt; test_run</strong>
+                  </div>
+                  <div className="thymos-console-line">
+                    <span>receipt</span>
+                    <strong>worker shell receipt emitted</strong>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div className="thymos-float thymos-float-left">
-              <span className="thymos-float-label">Cognition</span>
-              <strong>Intent emitted</strong>
-              <div className="thymos-float-bars">
-                <span />
-                <span />
-                <span />
-              </div>
-            </div>
+              <article className="thymos-sidecard thymos-sidecard-a">
+                <span className="thymos-sidecard-label">Signed writ</span>
+                <strong>tool scope</strong>
+                <p>repo_map, fs_read, grep, fs_patch, test_run</p>
+              </article>
 
-            <div className="thymos-float thymos-float-right">
-              <span className="thymos-float-label">Ledger</span>
-              <strong>Commit #seq+1</strong>
-              <div className="thymos-float-ring" />
+              <article className="thymos-sidecard thymos-sidecard-b">
+                <span className="thymos-sidecard-label">Policy trace</span>
+                <strong>allow / deny / suspend</strong>
+                <p>Decision state is first-class data, not a missing log line.</p>
+              </article>
             </div>
           </div>
         </section>
 
-        <section className="thymos-framework thymos-section" id="framework">
+        <section className="thymos-proof-strip thymos-reveal thymos-delay-4">
+          {proofItems.map((item) => (
+            <span className="thymos-proof-chip" key={item}>
+              {item}
+            </span>
+          ))}
+        </section>
+
+        <section className="thymos-section" id="runtime">
           <div className="thymos-section-head">
-            <span className="thymos-kicker">Framework</span>
-            <h2>The runtime decides. The model proposes.</h2>
+            <span className="thymos-kicker">What OpenThymos is</span>
+            <h2>Where machine intelligence becomes bounded, auditable action.</h2>
             <p>
-              Cognition is the proposer. The runtime owns authorization, policy, effects, and
-              history. Nothing reaches the outside world without a signed Writ and a ledger entry.
+              OpenThymos is not a chatbot shell with a few tools bolted on. It is a
+              model-agnostic execution runtime where cognition proposes, policy decides, and the
+              ledger preserves what actually happened.
             </p>
           </div>
 
-          <div className="thymos-pillars-grid">
-            {frameworkCards.map((pillar) => (
+          <div className="thymos-runtime-grid">
+            <article className="thymos-story-card">
+              <span className="thymos-card-label">Runtime thesis</span>
+              <h3>Execution stays under system control.</h3>
+              <p>
+                The category is governed execution. Typed intents, signed writs, policy gates, and
+                commit-time verification give OpenThymos the properties serious builders expect
+                from infrastructure, not promptware.
+              </p>
+              <div className="thymos-story-metrics">
+                <div>
+                  <span>governance</span>
+                  <strong>signed authority</strong>
+                </div>
+                <div>
+                  <span>effects</span>
+                  <strong>typed tool contracts</strong>
+                </div>
+                <div>
+                  <span>history</span>
+                  <strong>replayable ledger</strong>
+                </div>
+              </div>
+            </article>
+
+            <div className="thymos-runtime-notes">
+              {runtimeNotes.map((item) => (
+                <article className="thymos-runtime-note" key={item.title}>
+                  <span className="thymos-card-label">{item.label}</span>
+                  <h3>{item.title}</h3>
+                  <p>{item.body}</p>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="thymos-section" id="mechanism">
+          <div className="thymos-section-head compact">
+            <span className="thymos-kicker">How it works</span>
+            <h2>Intent -&gt; Proposal -&gt; Commit.</h2>
+            <p>
+              The core mechanism is fast to grasp because the runtime shape stays stable. Cognition
+              emits intent. The system resolves authority and policy. Approved work becomes a
+              durable commit.
+            </p>
+          </div>
+
+          <div className="thymos-mechanism-shell">
+            <div className="thymos-mechanism-rail" aria-hidden="true" />
+            <div className="thymos-mechanism-grid">
+              {mechanismStages.map((stage) => (
+                <article className="thymos-mechanism-card" key={stage.step}>
+                  <span className="thymos-card-label">{stage.step}</span>
+                  <h3>{stage.title}</h3>
+                  <p>{stage.body}</p>
+                </article>
+              ))}
+            </div>
+
+            <div className="thymos-mechanism-ledger">
+              <span className="thymos-card-label">Ledger outcome</span>
+              <strong>Allowed, denied, and suspended steps all survive as trajectory history.</strong>
+            </div>
+          </div>
+        </section>
+
+        <section className="thymos-section" id="pillars">
+          <div className="thymos-section-head compact">
+            <span className="thymos-kicker">Feature pillars</span>
+            <h2>Built like runtime infrastructure, not agent theater.</h2>
+            <p>
+              The product surface is sharp because the internals are opinionated: bounded
+              authority, typed execution, durable history, and provider portability.
+            </p>
+          </div>
+
+          <div className="thymos-pillar-grid">
+            {pillarCards.map((pillar) => (
               <article className="thymos-pillar-card" key={pillar.title}>
                 <span className="thymos-card-label">{pillar.label}</span>
                 <h3>{pillar.title}</h3>
@@ -225,115 +362,173 @@ export function ThymosLanding() {
           </div>
         </section>
 
-        <section className="thymos-architecture thymos-section" id="flow">
+        <section className="thymos-section" id="coding-agent">
           <div className="thymos-section-head">
-            <span className="thymos-kicker">IPC Triad</span>
-            <h2>Intent → Proposal → Commit.</h2>
+            <span className="thymos-kicker">Coding-agent surface</span>
+            <h2>Repo-aware actions, governed like every other runtime effect.</h2>
             <p>
-              Four stages, one cycle. Every turn of the agent loop compiles down to this shape,
-              which is why the whole history is replayable.
+              The first high-value surface in OpenThymos is coding work: inspect a repository,
+              read the right files, patch code, run tests, and keep the full trajectory.
             </p>
           </div>
 
-          <div className="thymos-architecture-grid compact">
-            {architectureCards.map((item) => (
-              <article className="thymos-architecture-card" key={item.step}>
-                <span className="thymos-card-label">{item.step}</span>
-                <h3>{item.title}</h3>
-                <p>{item.body}</p>
+          <div className="thymos-coding-grid">
+            <article className="thymos-coding-panel">
+              <div className="thymos-coding-head">
+                <div>
+                  <span className="thymos-card-label">Typed tools</span>
+                  <h3>Real repo actions, not vague tool JSON.</h3>
+                </div>
+                <span className="thymos-coding-badge">path-confined</span>
+              </div>
+
+              <div className="thymos-tool-table" role="table" aria-label="Coding tools">
+                {codingTools.map(([tool, effect, summary]) => (
+                  <div className="thymos-tool-row" role="row" key={tool}>
+                    <strong role="cell">{tool}</strong>
+                    <span role="cell">{effect}</span>
+                    <p role="cell">{summary}</p>
+                  </div>
+                ))}
+              </div>
+            </article>
+
+            <article className="thymos-trajectory-panel">
+              <span className="thymos-card-label">Run trace</span>
+              <h3>Each edit and test becomes governed history.</h3>
+
+              <div className="thymos-trace-list">
+                <div className="thymos-trace-item">
+                  <span>01</span>
+                  <div>
+                    <strong>repo_map</strong>
+                    <p>workspace discovered, crate graph loaded</p>
+                  </div>
+                </div>
+                <div className="thymos-trace-item">
+                  <span>02</span>
+                  <div>
+                    <strong>fs_read</strong>
+                    <p>policy allowed read inside scoped root</p>
+                  </div>
+                </div>
+                <div className="thymos-trace-item">
+                  <span>03</span>
+                  <div>
+                    <strong>fs_patch</strong>
+                    <p>unique-anchor replace committed to trajectory</p>
+                  </div>
+                </div>
+                <div className="thymos-trace-item">
+                  <span>04</span>
+                  <div>
+                    <strong>test_run</strong>
+                    <p>suite executed, observation attached to commit</p>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section className="thymos-section" id="backends">
+          <div className="thymos-section-head compact">
+            <span className="thymos-kicker">Local + hosted backends</span>
+            <h2>Use any model. Keep execution under your control.</h2>
+            <p>
+              Cognition is pluggable. Governance is not. OpenThymos keeps the runtime contract
+              stable whether you point it at a local endpoint or a hosted provider.
+            </p>
+          </div>
+
+          <div className="thymos-backend-grid">
+            {providerGroups.map((group) => (
+              <article className="thymos-backend-card" key={group.title}>
+                <span className="thymos-card-label">{group.label}</span>
+                <h3>{group.title}</h3>
+                <p>{group.body}</p>
+                <div className="thymos-provider-chips">
+                  {group.chips.map((chip) => (
+                    <span key={chip}>{chip}</span>
+                  ))}
+                </div>
               </article>
             ))}
           </div>
         </section>
 
-        <section className="thymos-commercial thymos-section" id="provenance">
+        <section className="thymos-section" id="workflow">
           <div className="thymos-section-head compact">
-            <span className="thymos-kicker">Provenance</span>
-            <h2>Why a runtime, not a prompt loop.</h2>
+            <span className="thymos-kicker">Developer / operator workflow</span>
+            <h2>Fast enough for builders. Controlled enough for operators.</h2>
             <p>
-              A loop of prompts plus JSON tool calls has no authorization layer and no durable
-              record. Thymos fixes both.
+              The same runtime supports day-to-day coding work and higher-assurance operating
+              modes. That is the point of making governance a first-class system primitive.
             </p>
           </div>
 
-          <div className="thymos-pillars-grid">
-            {provenanceCards.map((item) => (
-              <article className="thymos-pillar-card" key={item.title}>
-                <span className="thymos-card-label">{item.label}</span>
-                <h3>{item.title}</h3>
-                <p>{item.body}</p>
+          <div className="thymos-workflow-grid">
+            {workflowColumns.map((column) => (
+              <article className="thymos-workflow-card" key={column.title}>
+                <h3>{column.title}</h3>
+                <ul>
+                  {column.items.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
               </article>
             ))}
           </div>
         </section>
 
-        <section className="thymos-architecture thymos-section" id="quickstart">
-          <div className="thymos-section-head compact">
-            <span className="thymos-kicker">Quickstart</span>
-            <h2>Run a full Intent → Commit cycle in under a minute.</h2>
+        <section className="thymos-cta-shell thymos-section">
+          <div className="thymos-cta-copy">
+            <span className="thymos-kicker">Deployable intelligence runtime</span>
+            <h2>OpenThymos turns models into governed execution.</h2>
             <p>
-              No API key needed. The <code>hello_triad</code> example signs a Writ, submits four
-              intents, gets one rejected by policy, and prints the full trajectory.
+              Run the live console, inspect the architecture, or read the code. The point is the
+              same in every path: execution stays bounded, typed, and replayable.
             </p>
+
+            <div className="thymos-hero-actions">
+              <a
+                className="thymos-primary-action"
+                href={siteConfig.githubUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                View source
+              </a>
+              <a
+                className="thymos-secondary-action"
+                href="#workflow"
+              >
+                See the workflow
+              </a>
+            </div>
           </div>
 
-          <div className="thymos-pillars-grid">
-            <article className="thymos-pillar-card">
-              <span className="thymos-card-label">1 · Clone</span>
-              <h3>git clone</h3>
-              <p>
-                <code>git clone {siteConfig.githubUrl}</code>
-              </p>
-            </article>
-            <article className="thymos-pillar-card">
-              <span className="thymos-card-label">2 · Build</span>
-              <h3>cargo build</h3>
-              <p>
-                <code>cd thymos && cargo build --release</code>
-              </p>
-            </article>
-            <article className="thymos-pillar-card">
-              <span className="thymos-card-label">3 · Triad demo</span>
-              <h3>cargo run</h3>
-              <p>
-                <code>cargo run --example hello_triad -p thymos-runtime</code>
-              </p>
-            </article>
-            <article className="thymos-pillar-card">
-              <span className="thymos-card-label">4 · Server + UI</span>
-              <h3>Live trajectory viewer</h3>
-              <p>
-                <code>cargo run -p thymos-server</code> then open{" "}
-                <a href="/runs">/runs</a> to launch a mock run and watch the ledger stream.
-              </p>
-            </article>
-          </div>
-        </section>
-
-        <section className="thymos-proofband thymos-section" id="status">
-          <div className="thymos-section-head compact">
-            <span className="thymos-kicker">Status · Phase 1</span>
-            <h2>Reference implementation in Rust. 11 crates, 93 passing tests.</h2>
-            <p>
-              Pre-alpha. The IPC Triad, signed Writs, ledger, policy, tool contracts, cognition
-              adapters, async runtime, HTTP server, and SSE streaming are implemented and tested.
-              Not yet: shadow branches, deterministic replay, stratified memory, web debugger.
-            </p>
-          </div>
-
-          <div className="thymos-usecase-row">
-            {crateList.map((item) => (
-              <span className="thymos-usecase-chip" key={item}>
-                {item}
-              </span>
-            ))}
+          <div className="thymos-command-card">
+            <span className="thymos-card-label">Get started</span>
+            <div className="thymos-command-line">
+              <span>$</span>
+              <code>cargo run -p thymos-server</code>
+            </div>
+            <div className="thymos-command-line">
+              <span>$</span>
+              <code>npm run dev</code>
+            </div>
+            <div className="thymos-command-line">
+              <span>$</span>
+              <code>open /runs</code>
+            </div>
           </div>
         </section>
 
         <footer className="thymos-footer">
           <ThymosLogo />
           <div className="thymos-footer-copy">
-            <strong>Thymos — governed-cognition runtime</strong>
+            <strong>OpenThymos is governed execution for AI systems.</strong>
             <span>
               An {siteConfig.org} project · Apache-2.0 · {siteConfig.supportEmail}
             </span>
