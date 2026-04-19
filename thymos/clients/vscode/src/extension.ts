@@ -1,6 +1,6 @@
 // Thymos VSCode extension — bridge between VSCode and the Thymos
-// governed-cognition runtime. Owns a webview panel that pops to the front
-// on each pending approval with inline Approve/Deny + Open Diff buttons.
+// governed-cognition runtime. Owns a docked sidebar view with inline
+// Approve/Deny + Open Diff buttons.
 
 import * as vscode from "vscode";
 
@@ -10,6 +10,7 @@ type Config = {
   cliPath: string;
   provider: string;
   preset: "default" | "code";
+  openPanelOnStartup: boolean;
 };
 
 function getConfig(): Config {
@@ -20,6 +21,7 @@ function getConfig(): Config {
     cliPath: c.get<string>("cliPath", "thymos"),
     provider: c.get<string>("provider", "anthropic"),
     preset: c.get<"default" | "code">("preset", "code"),
+    openPanelOnStartup: c.get<boolean>("openPanelOnStartup", true),
   };
 }
 
@@ -47,62 +49,33 @@ async function httpJson(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Webview panel — the "popup" that shows streaming output and pops to front
-// on pending approvals with inline buttons.
+// Docked sidebar view — persistent Thymos console with inline approvals.
 // ────────────────────────────────────────────────────────────────────────────
 
-class ThymosPanel {
-  private static current: ThymosPanel | undefined;
-  private readonly panel: vscode.WebviewPanel;
+class ThymosSidebar implements vscode.WebviewViewProvider {
+  static readonly viewType = "thymos.sidebar";
+  private static current: ThymosSidebar | undefined;
+  private view: vscode.WebviewView | undefined;
   private pendingDecisions = new Map<string, (approved: boolean) => void>();
+  private queuedMessages: Array<{ type: string; [key: string]: any }> = [];
   private disposables: vscode.Disposable[] = [];
 
-  static show(context: vscode.ExtensionContext): ThymosPanel {
-    if (ThymosPanel.current) {
-      ThymosPanel.current.panel.reveal(vscode.ViewColumn.Beside, true);
-      return ThymosPanel.current;
-    }
-    const panel = vscode.window.createWebviewPanel(
-      "thymos",
-      "Thymos",
-      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
-      { enableScripts: true, retainContextWhenHidden: true },
-    );
-    ThymosPanel.current = new ThymosPanel(panel, context);
-    return ThymosPanel.current;
+  constructor(_context: vscode.ExtensionContext) {
+    ThymosSidebar.current = this;
   }
 
-  private constructor(
-    panel: vscode.WebviewPanel,
-    _context: vscode.ExtensionContext,
-  ) {
-    this.panel = panel;
-    this.panel.webview.html = this.render();
-
-    this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
-
-    this.panel.webview.onDidReceiveMessage(
+  resolveWebviewView(webviewView: vscode.WebviewView) {
+    this.view = webviewView;
+    this.view.webview.options = {
+      enableScripts: true,
+    };
+    this.view.webview.html = this.render();
+    this.view.webview.onDidReceiveMessage(
       (msg) => this.onMessage(msg),
       null,
       this.disposables,
     );
-  }
-
-  private dispose() {
-    ThymosPanel.current = undefined;
-    // Resolve any dangling approvals as denies so the run doesn't hang.
-    for (const resolve of this.pendingDecisions.values()) {
-      resolve(false);
-    }
-    this.pendingDecisions.clear();
-    while (this.disposables.length) {
-      const d = this.disposables.pop();
-      try {
-        d?.dispose();
-      } catch {
-        /* ignore */
-      }
-    }
+    this.flushQueuedMessages();
   }
 
   private onMessage(msg: any) {
@@ -123,24 +96,41 @@ class ThymosPanel {
     }
   }
 
+  private postMessage(message: { type: string; [key: string]: any }) {
+    if (!this.view) {
+      this.queuedMessages.push(message);
+      return;
+    }
+    void this.view.webview.postMessage(message);
+  }
+
+  private flushQueuedMessages() {
+    if (!this.view || this.queuedMessages.length === 0) return;
+    const messages = [...this.queuedMessages];
+    this.queuedMessages = [];
+    for (const message of messages) {
+      void this.view.webview.postMessage(message);
+    }
+  }
+
   log(text: string, level: "info" | "warn" | "error" = "info") {
-    void this.panel.webview.postMessage({ type: "log", text, level });
+    this.postMessage({ type: "log", text, level });
   }
 
   runStarted(runId: string, task: string) {
-    void this.panel.webview.postMessage({ type: "run", runId, task });
+    this.postMessage({ type: "run", runId, task });
   }
 
   statusChanged(status: string) {
-    void this.panel.webview.postMessage({ type: "status", status });
+    this.postMessage({ type: "status", status });
   }
 
   finalAnswer(text: string) {
-    void this.panel.webview.postMessage({ type: "final", text });
+    this.postMessage({ type: "final", text });
   }
 
   reveal() {
-    this.panel.reveal(vscode.ViewColumn.Beside, false);
+    void vscode.commands.executeCommand("workbench.view.extension.thymos");
   }
 
   /** Show an approval card and resolve when the user clicks Approve/Deny. */
@@ -158,7 +148,7 @@ class ThymosPanel {
     this.reveal();
     return new Promise<boolean>((resolve) => {
       this.pendingDecisions.set(card.id, resolve);
-      void this.panel.webview.postMessage({ type: "approval", card });
+      this.postMessage({ type: "approval", card });
     });
   }
 
@@ -327,6 +317,22 @@ class ThymosPanel {
 </body>
 </html>`;
   }
+
+  dispose() {
+    ThymosSidebar.current = undefined;
+    for (const resolve of this.pendingDecisions.values()) {
+      resolve(false);
+    }
+    this.pendingDecisions.clear();
+    while (this.disposables.length) {
+      const d = this.disposables.pop();
+      try {
+        d?.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -334,6 +340,9 @@ class ThymosPanel {
 // ────────────────────────────────────────────────────────────────────────────
 
 let statusItem: vscode.StatusBarItem;
+let panelItem: vscode.StatusBarItem;
+let shellItem: vscode.StatusBarItem;
+let sidebar: ThymosSidebar;
 
 async function refreshHealth(): Promise<void> {
   const cfg = getConfig();
@@ -343,18 +352,18 @@ async function refreshHealth(): Promise<void> {
     });
     if (status === 200) {
       statusItem.text = "$(pulse) Thymos";
-      statusItem.tooltip = `Thymos server OK — ${cfg.url}`;
+      statusItem.tooltip = `Thymos server OK — ${cfg.url}\nClick for launcher`;
       statusItem.backgroundColor = undefined;
     } else {
       statusItem.text = "$(warning) Thymos";
-      statusItem.tooltip = `Thymos ${status} — ${cfg.url}`;
+      statusItem.tooltip = `Thymos ${status} — ${cfg.url}\nClick for launcher`;
       statusItem.backgroundColor = new vscode.ThemeColor(
         "statusBarItem.warningBackground",
       );
     }
   } catch {
     statusItem.text = "$(debug-disconnect) Thymos";
-    statusItem.tooltip = `Thymos unreachable — ${cfg.url}`;
+    statusItem.tooltip = `Thymos unreachable — ${cfg.url}\nClick for launcher`;
     statusItem.backgroundColor = new vscode.ThemeColor(
       "statusBarItem.errorBackground",
     );
@@ -381,6 +390,55 @@ function cmdOpenShell() {
   if (cwd) {
     terminal.sendText(`set preset ${cfg.preset}`);
     terminal.sendText(`set workspace ${cwd}`);
+  }
+}
+
+async function cmdQuickOpen(context: vscode.ExtensionContext) {
+  const choice = await vscode.window.showQuickPick(
+    [
+      {
+        label: "$(preview) Show Sidebar",
+        description: "Reveal the docked Thymos sidebar",
+        action: "panel",
+      },
+      {
+        label: "$(terminal) Open Shell",
+        description: "Launch the integrated Thymos terminal",
+        action: "shell",
+      },
+      {
+        label: "$(play) Run Task",
+        description: "Submit a task to Thymos",
+        action: "run",
+      },
+      {
+        label: "$(pulse) Health Check",
+        description: "Verify the Thymos server connection",
+        action: "health",
+      },
+    ],
+    {
+      title: "Thymos",
+      placeHolder: "Choose what to open",
+      ignoreFocusOut: true,
+    },
+  );
+
+  if (!choice) return;
+
+  switch (choice.action) {
+    case "panel":
+      sidebar.reveal();
+      break;
+    case "shell":
+      cmdOpenShell();
+      break;
+    case "run":
+      await cmdRunTask(context);
+      break;
+    case "health":
+      await cmdHealth();
+      break;
   }
 }
 
@@ -419,7 +477,8 @@ async function cmdRunTask(context: vscode.ExtensionContext) {
   });
   if (!task) return;
 
-  const panel = ThymosPanel.show(context);
+  const panel = sidebar;
+  panel.reveal();
   panel.log(`submitting: ${task}`);
   panel.statusChanged("submitting");
 
@@ -462,7 +521,7 @@ async function pollRun(
   cfg: Config,
   runId: string,
   cwd: string,
-  panel: ThymosPanel,
+  panel: ThymosSidebar,
 ): Promise<void> {
   const handled = new Set<number>();
   let lastStatus: string | null = null;
@@ -517,7 +576,7 @@ async function handleApproval(
   cfg: Config,
   cwd: string,
   entry: any,
-  panel: ThymosPanel,
+  panel: ThymosSidebar,
 ): Promise<boolean> {
   const channel: string = entry.detail?.channel ?? "?";
   const reason: string = entry.detail?.reason ?? "(no reason)";
@@ -610,7 +669,8 @@ async function cmdReviewPending(context: vscode.ExtensionContext) {
     vscode.window.showInformationMessage("No pending approvals for that run.");
     return;
   }
-  const panel = ThymosPanel.show(context);
+  const panel = sidebar;
+  panel.reveal();
   const cwd = workspaceRoot() ?? "";
   for (const entry of pending) {
     const approved = await handleApproval(cfg, cwd, entry, panel);
@@ -629,14 +689,40 @@ async function cmdReviewPending(context: vscode.ExtensionContext) {
 // ────────────────────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext) {
+  sidebar = new ThymosSidebar(context);
+
   statusItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
     100,
   );
-  statusItem.command = "thymos.health";
+  statusItem.command = "thymos.quickOpen";
   statusItem.text = "$(pulse) Thymos";
   statusItem.show();
-  context.subscriptions.push(statusItem);
+  panelItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    99,
+  );
+  panelItem.command = "thymos.showPanel";
+  panelItem.text = "$(preview) Sidebar";
+  panelItem.tooltip = "Reveal the Thymos sidebar";
+  panelItem.show();
+
+  shellItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    98,
+  );
+  shellItem.command = "thymos.openShell";
+  shellItem.text = "$(terminal) Shell";
+  shellItem.tooltip = "Open the Thymos integrated shell";
+  shellItem.show();
+
+  context.subscriptions.push(statusItem, panelItem, shellItem);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(ThymosSidebar.viewType, sidebar, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    { dispose: () => sidebar.dispose() },
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("thymos.openShell", cmdOpenShell),
@@ -647,10 +733,22 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("thymos.reviewPending", () =>
       cmdReviewPending(context),
     ),
-    vscode.commands.registerCommand("thymos.showPanel", () =>
-      ThymosPanel.show(context),
+    vscode.commands.registerCommand("thymos.showPanel", () => sidebar.reveal()),
+    vscode.commands.registerCommand("thymos.quickOpen", () =>
+      cmdQuickOpen(context),
     ),
   );
+
+  const cfg = getConfig();
+  if (cfg.openPanelOnStartup) {
+    setTimeout(() => {
+      try {
+        sidebar.reveal();
+      } catch {
+        /* ignore sidebar startup errors */
+      }
+    }, 250);
+  }
 
   refreshHealth();
   const interval = setInterval(refreshHealth, 15_000);

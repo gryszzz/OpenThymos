@@ -34,10 +34,33 @@
       },
       {
         "command": "thymos.showPanel",
-        "title": "Thymos: Show Panel",
+        "title": "Thymos: Show Sidebar",
+        "category": "Thymos"
+      },
+      {
+        "command": "thymos.quickOpen",
+        "title": "Thymos: Open Launcher",
         "category": "Thymos"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "thymos",
+          "title": "Thymos",
+          "icon": "media/thymos.svg"
+        }
+      ]
+    },
+    "views": {
+      "thymos": [
+        {
+          "type": "webview",
+          "id": "thymos.sidebar",
+          "name": "Agent Console"
+        }
+      ]
+    },
     "configuration": {
       "title": "Thymos",
       "properties": {
@@ -67,6 +90,11 @@
           "enum": ["default", "code"],
           "default": "code",
           "description": "Default shell preset."
+        },
+        "thymos.openPanelOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reveal the Thymos sidebar automatically when the extension activates."
         }
       }
     }
