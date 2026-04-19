@@ -140,17 +140,18 @@ impl<C: Cognition + Send> StreamingCognition for NonStreamingAdapter<C> {
         ctx: &CognitionContext<'_>,
         event_tx: tokio::sync::mpsc::Sender<CognitionEvent>,
     ) -> Result<CognitionStep> {
-        // Blocking step runs on a worker so the async caller is never blocked
-        // by HTTP retries in the underlying adapter. Any retry/backoff the
-        // wrapped cognition performs (e.g. AnthropicCognition::post_with_retry)
-        // is preserved verbatim — we do not add a second retry layer.
-        //
-        // Safety: the blocking call borrows `ctx` but `spawn_blocking` requires
-        // `'static`. Because `step` is synchronous and returns before this
-        // future resolves, we run it inline on the current thread instead — the
-        // async runtime's cooperative scheduling is preserved by the fact that
-        // the blocking HTTP client yields via OS-level I/O.
-        let step_result = self.0.step(ctx);
+        // `block_in_place` lets the synchronous `Cognition::step` call do
+        // blocking work without pinning the reactor and still preserves the
+        // borrowed `&ctx` (which `spawn_blocking`'s `'static` bound would
+        // reject). Some callers and tests run on Tokio's current-thread
+        // runtime, though, where `block_in_place` panics. Fall back to a
+        // direct call in that environment instead of crashing.
+        let step_result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| self.0.step(ctx))
+            }
+            _ => self.0.step(ctx),
+        };
 
         match &step_result {
             Ok(step) => {

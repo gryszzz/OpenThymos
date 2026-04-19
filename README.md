@@ -25,7 +25,7 @@ Most agent frameworks are a prompt loop plus a few tool calls. **Thymos treats a
 
 No Writ — no commit. No commit — no side effect. Every step is auditable, bounded, and replayable.
 
-The first surface built on top of this is a **coding agent**: read files, patch files, list, map, grep, run tests — every call typed, path-confined, ledgered, and model-agnostic across Anthropic, OpenAI, LM Studio, Ollama, and any OpenAI-compatible local backend.
+The first surface built on top of this is a **coding agent**: read files, patch files, list, map, grep, run tests — every call typed, path-confined, ledgered, and model-agnostic across Anthropic, OpenAI, LM Studio, Hugging Face Router, Ollama, and any OpenAI-compatible local backend.
 
 ```
 Cognition (LLM)          Runtime            Ledger
@@ -56,9 +56,23 @@ A loop of prompts plus JSON tool calls has **no authorization layer** and **no d
 
 ---
 
+## Use cases
+
+Concrete things people build on Thymos today:
+
+- **Code-refactor bot with audit trail.** Point the coding agent at a monorepo; every file read, patch, and test run becomes a ledger entry. Review the full trajectory before merging — including the proposals the policy engine *denied*.
+- **On-call runbook automation.** An agent reads logs and proposes remediation. The Writ scopes it to read-only on prod and write on staging; policy suspends risky actions for human approval. Every attempted action is preserved even if blocked — the ledger is your postmortem.
+- **Compliance-sensitive workflows.** Tamper-evident BLAKE3 hash chain + Ed25519-signed Writs mean you can *prove* what an agent did, under what authority, against what world state. Works for PII redaction pipelines, regulated financial tasks, and anything a SOC-2 auditor asks about.
+- **Local-only dev loop.** Pair the `lmstudio` provider with a local Qwen / DeepSeek Coder model. Zero cost, zero data egress, full ledger — good for sensitive repos where you can't send source to a hosted model.
+- **Multi-model A/B.** Run the same task twice via shadow branches — once with Claude, once with Qwen via HF Router — then diff the ledgers to compare approach, cost, and outcome side-by-side.
+
+---
+
 ## Quickstart
 
-No API key required. Mock cognition ships with the runtime.
+Three steps. Mock cognition ships with the runtime, so step 1 needs no API key.
+
+### 1. Smoke test (no model, no config)
 
 ```bash
 git clone https://github.com/gryszzz/THYMOS.git
@@ -66,41 +80,53 @@ cd THYMOS/thymos
 cargo run --example hello_triad -p thymos-runtime
 ```
 
-Expected output: a signed Writ, four Intents (one rejected by policy), and a final world projection — all in 170 lines of printed trajectory.
+Prints a signed Writ, four Intents (one denied by policy), and the final world projection.
 
-### Run the HTTP server
+### 2. Run the server with a real model
+
+Copy `.env.example` to `.env` and fill in **one** of the provider blocks below. The server auto-loads `.env` — no need to `export` anything.
 
 ```bash
-cargo run -p thymos-server
-# server on http://localhost:3001
+cp .env.example .env
+# edit .env, then:
+cargo run -p thymos-server           # listens on :3001
+```
+
+| Provider      | What to put in `.env`                                          |
+| ------------- | -------------------------------------------------------------- |
+| Anthropic     | `ANTHROPIC_API_KEY=sk-ant-...`                                 |
+| OpenAI        | `OPENAI_API_KEY=sk-...`                                        |
+| Hugging Face  | `HF_TOKEN=hf_...` *(needs "Inference Providers" scope)*        |
+| LM Studio     | nothing — defaults to `http://localhost:1234/v1`               |
+| Ollama / vLLM | `OPENAI_BASE_URL=http://localhost:11434/v1` (use `--provider local`) |
+
+Then kick off a run (picks the provider per request, so one server can serve all of them):
+
+```bash
 curl -X POST http://localhost:3001/runs \
   -H 'content-type: application/json' \
-  -d '{"task": "Set greeting to hello and read it back",
-       "cognition": {"provider": "mock"}}'
+  -d '{"task":"Set greeting to hello and read it back",
+       "cognition":{"provider":"huggingface"}}'
 ```
 
-### Live trajectory viewer (Next.js)
+Or via the CLI:
 
 ```bash
-# from repo root
-npm install
-npm run dev
+cargo run -p thymos-cli -- run "explain the ledger module" --provider huggingface
+```
+
+### 3. (optional) Live trajectory viewer
+
+```bash
+npm install && npm run dev    # from repo root
 # open http://localhost:3000/runs
-```
-
-### With a real model
-
-```bash
-ANTHROPIC_API_KEY=sk-ant-... cargo run -p thymos-server
-# or
-OPENAI_API_KEY=sk-... cargo run -p thymos-server
 ```
 
 ### With Docker
 
 ```bash
 cd thymos
-docker compose up --build
+docker compose up --build     # image carries full OCI labels (title, version, revision, source)
 ```
 
 ---
@@ -123,17 +149,13 @@ under the same writ/policy/ledger pipeline as every other Thymos action.
 Drive it through the HTTP server with whichever model you prefer:
 
 ```bash
-# LM Studio (free, local)
+# LM Studio (free, local — just load a model in LM Studio and start its server)
 curl -X POST http://localhost:3001/runs \
   -H 'content-type: application/json' \
   -d '{
     "task": "Add a retry helper to crates/thymos-cognition/src/openai.rs and a unit test.",
     "tool_scopes": ["repo_map","fs_read","fs_patch","grep","test_run"],
-    "cognition": {
-      "provider": "local",
-      "base_url": "http://localhost:1234/v1",
-      "model": "qwen2.5-coder-32b"
-    }
+    "cognition": { "provider": "lmstudio" }
   }'
 ```
 
@@ -153,7 +175,7 @@ thymos-ledger      append-only content-addressed store (SQLite; Postgres stub)
 thymos-policy      policy trait + stock policies (writ authority, threshold)
 thymos-tools       ToolContract trait + stock tools (kv, memory, shell, http, delegate, MCP, coding)
 thymos-compiler    Intent → Proposal compiler (writ resolution, policy eval, budget)
-thymos-cognition   LLM adapters (Anthropic, OpenAI, local OpenAI-compat, mock)
+thymos-cognition   LLM adapters (Anthropic, OpenAI, LM Studio, Hugging Face, local, mock)
 thymos-runtime     agent loop, world projection, async streaming, approval channel
 thymos-server      axum HTTP facade, SSE streams, JWT + API gateway, run store
 thymos-worker      subprocess sandbox for risky tool execution
@@ -318,7 +340,8 @@ THYMOS/
 └── thymos/                   ← the Rust framework
     ├── Cargo.toml            ← workspace
     ├── crates/               ← 12 crates
-    ├── Dockerfile            ← multi-stage server image
+    ├── .env.example          ← copy to .env for provider tokens (auto-loaded)
+    ├── Dockerfile            ← multi-stage server image (OCI labels + build-arg revision/version)
     └── docker-compose.yml    ← server + optional otel/jaeger/postgres
 ```
 

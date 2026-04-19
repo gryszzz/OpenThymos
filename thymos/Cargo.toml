@@ -54,6 +54,7 @@ tracing-opentelemetry = "0.29"
 tokio-postgres = "0.7"
 deadpool-postgres = { version = "0.14", features = ["serde"] }
 postgres-types = { version = "0.2", features = ["derive"] }
+dotenvy    = "0.15"
 
 [profile.release]
 lto = "thin"

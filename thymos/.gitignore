@@ -6,3 +6,5 @@ Cargo.lock.tmp
 *.db
 *.db-journal
 .DS_Store
+.env
+.env.local

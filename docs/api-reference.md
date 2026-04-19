@@ -51,7 +51,7 @@ Start a new agent run.
 | `task` | string | required | Natural language task description |
 | `max_steps` | u32 | 32 | Maximum agent loop iterations |
 | `tool_scopes` | string[] | `["*"]` | Tool glob patterns |
-| `cognition.provider` | string | "anthropic" | `anthropic`, `openai`, `local`, `mock` |
+| `cognition.provider` | string | "anthropic" | `anthropic`, `openai`, `local`, `lmstudio`, `huggingface`, `mock` |
 | `cognition.model` | string | provider default | Full id (`claude-opus-4-7`) or alias (`opus`, `sonnet`, `haiku`, `opus-4.6`) |
 | `cognition.max_tokens` | u32 | provider default | Cap on response tokens |
 | `cognition.thinking_budget_tokens` | u32 | null | Enable extended thinking with this budget (Anthropic 4.7+) |

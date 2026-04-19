@@ -36,7 +36,7 @@ enum Commands {
         /// Maximum steps (default: 16).
         #[arg(long, default_value = "16")]
         max_steps: u32,
-        /// Cognition provider: anthropic, openai, local, mock.
+        /// Cognition provider: anthropic, openai, local, lmstudio, huggingface, mock.
         #[arg(long, default_value = "anthropic")]
         provider: String,
         /// Model override.
@@ -45,6 +45,9 @@ enum Commands {
         /// Tool scopes (comma-separated).
         #[arg(long)]
         scopes: Option<String>,
+        /// After starting the run, stream cognition events until it completes.
+        #[arg(long, short = 'f')]
+        follow: bool,
     },
     /// Get run status and summary.
     Status {
@@ -112,6 +115,10 @@ enum RunsAction {
 
 #[tokio::main]
 async fn main() {
+    // Load .env from CWD or any parent dir so THYMOS_URL / THYMOS_API_KEY
+    // and provider tokens are picked up without needing to `source` manually.
+    let _ = dotenvy::dotenv();
+
     let cli = Cli::parse();
     let client = reqwest::Client::new();
 
@@ -122,6 +129,7 @@ async fn main() {
             provider,
             model,
             scopes,
+            follow,
         } => {
             cmd_run(
                 &client,
@@ -132,6 +140,7 @@ async fn main() {
                 &provider,
                 model,
                 scopes,
+                follow,
             )
             .await
         }
@@ -205,6 +214,7 @@ async fn cmd_run(
     provider: &str,
     model: Option<String>,
     scopes: Option<String>,
+    follow: bool,
 ) -> Result<(), String> {
     let mut body = serde_json::json!({
         "task": task,
@@ -231,11 +241,17 @@ async fn cmd_run(
     let body: Value = resp.json().await.map_err(|e| e.to_string())?;
 
     if status.is_success() || status.as_u16() == 202 {
-        let run_id = body["run_id"].as_str().unwrap_or("unknown");
+        let run_id = body["run_id"].as_str().unwrap_or("unknown").to_string();
         println!("Run started: {run_id}");
         println!("  task: {task}");
         println!("  provider: {provider}");
         println!();
+        if follow {
+            println!("--- streaming ---");
+            cmd_stream(url, &run_id).await?;
+            // Print final status once the stream closes.
+            return cmd_status(client, url, api_key, &run_id).await;
+        }
         println!("Poll status:  thymos status {run_id}");
         println!("Stream live:  thymos stream {run_id}");
     } else {

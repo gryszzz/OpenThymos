@@ -28,6 +28,24 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # (glibc 2.36) cannot load binaries linked against 2.39.
 FROM debian:trixie-slim
 
+# OCI image labels. Dynamic values come from build args; CI passes them via
+# docker/metadata-action. Local `docker build` falls back to the defaults.
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG CREATED=1970-01-01T00:00:00Z
+
+LABEL org.opencontainers.image.title="Thymos" \
+      org.opencontainers.image.description="Governed-cognition runtime for LLM agents. Separates cognition from execution via a typed Intent → Proposal → Ledger pipeline." \
+      org.opencontainers.image.url="https://github.com/gryszzz/THYMOS" \
+      org.opencontainers.image.source="https://github.com/gryszzz/THYMOS" \
+      org.opencontainers.image.documentation="https://github.com/gryszzz/THYMOS#readme" \
+      org.opencontainers.image.vendor="grysz" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.base.name="docker.io/library/debian:trixie-slim" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.created="${CREATED}"
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*

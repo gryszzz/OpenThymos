@@ -498,7 +498,17 @@ async fn resume_run(
 
     tokio::spawn(async move {
         let config = req.cognition.unwrap_or_default();
-        let cognition = build_cognition(&config);
+        // `build_cognition` may call `reqwest::blocking::ClientBuilder::build()`,
+        // which internally creates and drops a current-thread tokio runtime.
+        // Dropping a runtime from inside an async context panics, so construct
+        // the client on a blocking thread.
+        let cognition = match tokio::task::spawn_blocking(move || build_cognition(&config)).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cognition construction panicked: {e}");
+                return;
+            }
+        };
         let mut streaming = NonStreamingAdapter(cognition);
 
         // Resume: the runtime will pick up the existing trajectory.
@@ -798,7 +808,17 @@ async fn create_run(
     tokio::spawn(async move {
         // Build cognition from per-run config (or default to Anthropic).
         let config = req.cognition.unwrap_or_default();
-        let cognition = build_cognition(&config);
+        // `build_cognition` may call `reqwest::blocking::ClientBuilder::build()`,
+        // which internally creates and drops a current-thread tokio runtime.
+        // Dropping a runtime from inside an async context panics, so construct
+        // the client on a blocking thread.
+        let cognition = match tokio::task::spawn_blocking(move || build_cognition(&config)).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cognition construction panicked: {e}");
+                return;
+            }
+        };
         let mut streaming = NonStreamingAdapter(cognition);
 
         // Build approval requester that parks a oneshot in AppState.

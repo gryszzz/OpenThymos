@@ -31,6 +31,7 @@ opentelemetry-otlp    = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 rusqlite = { workspace = true }
 jsonwebtoken = "9"
+dotenvy    = { workspace = true }
 
 [dev-dependencies]
 axum-test = "20"

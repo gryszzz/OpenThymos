@@ -647,6 +647,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2590,6 +2596,7 @@ name = "thymos-cli"
 version = "0.0.1"
 dependencies = [
  "clap",
+ "dotenvy",
  "reqwest",
  "serde",
  "serde_json",
@@ -2712,6 +2719,7 @@ dependencies = [
  "async-stream",
  "axum 0.8.9",
  "axum-test",
+ "dotenvy",
  "hex",
  "jsonwebtoken",
  "opentelemetry",

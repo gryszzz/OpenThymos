@@ -73,12 +73,22 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=Thymos
+            org.opencontainers.image.description=Governed-cognition runtime for LLM agents. Separates cognition from execution via a typed Intent → Proposal → Ledger pipeline.
+            org.opencontainers.image.vendor=grysz
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.documentation=https://github.com/gryszzz/THYMOS#readme
       - uses: docker/build-push-action@v6
         with:
           context: thymos
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -91,6 +101,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: thymos-*
           merge-multiple: true
       - name: Create release
         uses: softprops/action-gh-release@v2

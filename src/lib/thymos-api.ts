@@ -50,7 +50,13 @@ export interface CognitionEvent {
 }
 
 /** Cognition provider selection for multi-model support. */
-export type CognitionProvider = "anthropic" | "openai" | "local" | "mock";
+export type CognitionProvider =
+  | "anthropic"
+  | "openai"
+  | "local"
+  | "lmstudio"
+  | "huggingface"
+  | "mock";
 
 export interface CognitionConfig {
   provider: CognitionProvider;

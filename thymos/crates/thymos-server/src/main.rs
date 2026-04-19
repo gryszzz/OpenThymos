@@ -21,6 +21,10 @@ use thymos_server::{
 
 #[tokio::main]
 async fn main() {
+    // Load .env from CWD or any parent dir before reading env-driven config.
+    // Never overrides an already-exported variable.
+    let _ = dotenvy::dotenv();
+
     telemetry::init();
 
     let config = match ServerConfig::from_env() {
@@ -87,11 +91,15 @@ async fn main() {
             }
         }
 
-        if !gw.usage_stats().is_empty() || gateway_store.is_some() {
-            eprintln!("API gateway enabled");
-            Some(Arc::new(gw))
-        } else {
+        // Enable the auth middleware only when there are actually keys to
+        // check against. A bare `gateway_store.is_some()` check used to enable
+        // auth as soon as the sqlite file was created, which locked everyone
+        // out of a fresh dev server until they set THYMOS_API_KEYS.
+        if gw.usage_stats().is_empty() {
             None
+        } else {
+            eprintln!("API gateway enabled ({} key(s))", gw.usage_stats().len());
+            Some(Arc::new(gw))
         }
     };
 
