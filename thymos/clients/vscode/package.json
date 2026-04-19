@@ -1,0 +1,79 @@
+{
+  "name": "thymos-vscode",
+  "displayName": "Thymos",
+  "description": "Governed-cognition coding agent — run Thymos agents from inside VSCode.",
+  "version": "0.0.1",
+  "publisher": "thymos",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "thymos.openShell",
+        "title": "Thymos: Open Shell",
+        "category": "Thymos"
+      },
+      {
+        "command": "thymos.runTask",
+        "title": "Thymos: Run Task (auto)",
+        "category": "Thymos"
+      },
+      {
+        "command": "thymos.health",
+        "title": "Thymos: Health Check",
+        "category": "Thymos"
+      },
+      {
+        "command": "thymos.reviewPending",
+        "title": "Thymos: Review Pending Approval",
+        "category": "Thymos"
+      }
+    ],
+    "configuration": {
+      "title": "Thymos",
+      "properties": {
+        "thymos.url": {
+          "type": "string",
+          "default": "http://localhost:3001",
+          "description": "Thymos server URL."
+        },
+        "thymos.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for authenticated requests (optional).",
+          "markdownDescription": "API key for authenticated requests. Prefer setting via VSCode Secrets if you publish this extension."
+        },
+        "thymos.cliPath": {
+          "type": "string",
+          "default": "thymos",
+          "description": "Path to the thymos CLI binary (or just 'thymos' if on PATH)."
+        },
+        "thymos.provider": {
+          "type": "string",
+          "default": "anthropic",
+          "description": "Default cognition provider."
+        },
+        "thymos.preset": {
+          "type": "string",
+          "enum": ["default", "code"],
+          "default": "code",
+          "description": "Default shell preset."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

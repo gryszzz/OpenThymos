@@ -1,0 +1,85 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "task",
+      "type": "promptString",
+      "description": "Task for the Thymos agent"
+    },
+    {
+      "id": "runId",
+      "type": "promptString",
+      "description": "Run ID"
+    }
+  ],
+  "tasks": [
+    {
+      "label": "Thymos: Start Server",
+      "type": "shell",
+      "command": "cargo run -p thymos-server",
+      "problemMatcher": ["$rustc"],
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "thymos"
+      }
+    },
+    {
+      "label": "Thymos: Shell (interactive)",
+      "type": "shell",
+      "command": "cargo run -p thymos-cli --quiet -- shell",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "thymos",
+        "focus": true,
+        "echo": false
+      }
+    },
+    {
+      "label": "Thymos: Auto Run",
+      "type": "shell",
+      "command": "cargo run -p thymos-cli --quiet -- run --follow --provider mock \"${input:task}\"",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "thymos"
+      }
+    },
+    {
+      "label": "Thymos: Health",
+      "type": "shell",
+      "command": "cargo run -p thymos-cli --quiet -- health",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "close": false
+      }
+    },
+    {
+      "label": "Thymos: Runs (last 20)",
+      "type": "shell",
+      "command": "cargo run -p thymos-cli --quiet -- runs ls --limit 20",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "Thymos: Run Show",
+      "type": "shell",
+      "command": "cargo run -p thymos-cli --quiet -- runs show ${input:runId}",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "Thymos: Test",
+      "type": "shell",
+      "command": "cargo test --workspace",
+      "group": "test",
+      "problemMatcher": ["$rustc"]
+    }
+  ]
+}

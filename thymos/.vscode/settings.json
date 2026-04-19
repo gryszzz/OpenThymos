@@ -1,0 +1,18 @@
+{
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.cargo.features": "all",
+  "terminal.integrated.env.osx": {
+    "THYMOS_URL": "http://localhost:3001"
+  },
+  "terminal.integrated.env.linux": {
+    "THYMOS_URL": "http://localhost:3001"
+  },
+  "terminal.integrated.env.windows": {
+    "THYMOS_URL": "http://localhost:3001"
+  },
+  "files.watcherExclude": {
+    "**/target/**": true,
+    "**/*.db": true,
+    "**/*.db-*": true
+  }
+}

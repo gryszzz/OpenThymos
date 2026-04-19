@@ -50,6 +50,19 @@ cargo run -p thymos-server
 
 See [`docs/getting-started.md`](docs/getting-started.md) for a full tour.
 
+## Editor integrations
+
+Run Thymos from inside VSCode two ways:
+
+1. **Tasks** — `.vscode/tasks.json` ships with `Thymos: Start Server`,
+   `Thymos: Shell (interactive)`, `Thymos: Auto Run`, `Thymos: Health`,
+   `Thymos: Runs (last 20)`, and `Thymos: Test`. Open the Command Palette →
+   *Tasks: Run Task*. Zero extension install.
+2. **Extension** — [`clients/vscode`](clients/vscode/README.md) — status-bar
+   health indicator, one-click shell launcher, and **native diff review** for
+   every pending `fs_patch` approval. Build with `npm install && npm run
+   compile`, then F5 or `npx vsce package`.
+
 ## Architecture
 
 ```
