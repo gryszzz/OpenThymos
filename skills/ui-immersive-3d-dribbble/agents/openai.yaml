@@ -1,0 +1,4 @@
+interface:
+  display_name: "Immersive 3D UI Design"
+  short_description: "Create premium Dribbble-inspired spatial interfaces"
+  default_prompt: "Use $ui-immersive-3d-dribbble to design a bold, immersive, 3D-leaning interface with layered depth, premium motion, and production-ready responsiveness."

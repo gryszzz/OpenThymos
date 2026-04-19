@@ -1,0 +1,4 @@
+interface:
+  display_name: "Framer Motion UI"
+  short_description: "Build polished Motion-powered React interfaces"
+  default_prompt: "Use $framer-motion-ui-animations to design and implement a React UI with Framer Motion choreography, high-end transitions, and performance-safe animation patterns."
