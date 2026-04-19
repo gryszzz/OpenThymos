@@ -221,12 +221,16 @@ Entry kinds: `root`, `commit`, `rejection`, `pending_approval`, `delegation`, `b
 
 ## Cognition providers
 
-| Provider   | Config                                                                     | Requires            |
-| ---------- | -------------------------------------------------------------------------- | ------------------- |
-| Anthropic  | `{"provider": "anthropic", "model": "claude-opus-4-7"}`                    | `ANTHROPIC_API_KEY` |
-| OpenAI     | `{"provider": "openai", "model": "gpt-4o"}`                                | `OPENAI_API_KEY`    |
-| Local      | `{"provider": "local", "base_url": "http://localhost:11434/v1"}`           | Ollama / vLLM / LM Studio |
-| Mock       | `{"provider": "mock"}`                                                     | nothing             |
+| Provider     | Config                                                                            | Requires                            |
+| ------------ | --------------------------------------------------------------------------------- | ----------------------------------- |
+| Anthropic    | `{"provider": "anthropic", "model": "claude-opus-4-7"}`                           | `ANTHROPIC_API_KEY`                 |
+| OpenAI       | `{"provider": "openai", "model": "gpt-4o"}`                                       | `OPENAI_API_KEY`                    |
+| LM Studio    | `{"provider": "lmstudio", "model": "qwen2.5-coder-32b-instruct"}`                 | LM Studio running on `:1234`        |
+| Hugging Face | `{"provider": "huggingface", "model": "Qwen/Qwen2.5-Coder-32B-Instruct"}`         | `HF_TOKEN`                          |
+| Local        | `{"provider": "local", "base_url": "http://localhost:11434/v1"}`                  | Ollama / vLLM / llama.cpp           |
+| Mock         | `{"provider": "mock"}`                                                            | nothing                             |
+
+Full provider matrix and recommended models: [`docs/providers.md`](docs/providers.md).
 
 The Anthropic adapter has prompt-cache breakpoints, extended-thinking support (Opus 4.7+), internal-history trimming that preserves `tool_use` / `tool_result` pairing, transient-error retry with exponential backoff, and full `stop_reason` handling (`end_turn`, `tool_use`, `max_tokens`, `stop_sequence`, `pause_turn`, `refusal`).
 

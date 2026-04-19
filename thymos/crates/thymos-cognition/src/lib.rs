@@ -181,8 +181,12 @@ impl<C: Cognition + Send> StreamingCognition for NonStreamingAdapter<C> {
 pub enum CognitionProvider {
     Anthropic,
     Openai,
-    /// A local/custom OpenAI-compatible endpoint (e.g. Ollama, vLLM, LM Studio).
+    /// A local/custom OpenAI-compatible endpoint (Ollama, vLLM, llama.cpp).
     Local,
+    /// LM Studio's OpenAI-compatible local server (default :1234/v1).
+    Lmstudio,
+    /// Hugging Face Router (serverless inference, OpenAI-compatible).
+    Huggingface,
     Mock,
 }
 
@@ -298,6 +302,68 @@ pub fn build_cognition(config: &CognitionConfig) -> Box<dyn Cognition> {
                 Err(_) => Box::new(mock::MockCognition::new(
                     vec![],
                     Some("local cognition failed to init".into()),
+                )),
+            }
+        }
+        CognitionProvider::Lmstudio => {
+            // LM Studio exposes an OpenAI-compatible server on :1234 by
+            // default. No auth required; the `model` argument is ignored by
+            // most LM Studio builds (it serves whichever model is loaded).
+            let base_url = config
+                .base_url
+                .clone()
+                .or_else(|| std::env::var("LMSTUDIO_BASE_URL").ok())
+                .unwrap_or_else(|| "http://localhost:1234/v1".into());
+            let model = config
+                .model
+                .clone()
+                .or_else(|| std::env::var("LMSTUDIO_MODEL").ok())
+                .unwrap_or_else(|| "local-model".into());
+            let api_key = std::env::var("LMSTUDIO_API_KEY").unwrap_or_else(|_| "lm-studio".into());
+            match openai::OpenAiCognition::new(api_key, base_url, model) {
+                Ok(mut c) => {
+                    if let Some(t) = config.max_tokens {
+                        c = c.with_max_tokens(t);
+                    }
+                    Box::new(c)
+                }
+                Err(_) => Box::new(mock::MockCognition::new(
+                    vec![],
+                    Some("lmstudio cognition failed to init".into()),
+                )),
+            }
+        }
+        CognitionProvider::Huggingface => {
+            // HF Router is the unified OpenAI-compatible endpoint. The token
+            // can come from `HF_TOKEN` (canonical) or `HUGGINGFACE_API_KEY`.
+            let base_url = config
+                .base_url
+                .clone()
+                .or_else(|| std::env::var("HF_BASE_URL").ok())
+                .unwrap_or_else(|| "https://router.huggingface.co/v1".into());
+            let model = config
+                .model
+                .clone()
+                .or_else(|| std::env::var("HF_MODEL").ok())
+                .unwrap_or_else(|| "Qwen/Qwen2.5-Coder-32B-Instruct".into());
+            let api_key = std::env::var("HF_TOKEN")
+                .or_else(|_| std::env::var("HUGGINGFACE_API_KEY"))
+                .unwrap_or_default();
+            if api_key.is_empty() {
+                eprintln!(
+                    "warn: HF_TOKEN / HUGGINGFACE_API_KEY not set; HF Router will reject requests"
+                );
+            }
+            match openai::OpenAiCognition::new(api_key, base_url, model) {
+                Ok(mut c) => {
+                    if let Some(t) = config.max_tokens {
+                        c = c.with_max_tokens(t);
+                    }
+                    Box::new(c)
+                }
+                Err(_) => Box::new(mock::MockCognition::new(
+                    vec![],
+                    Some("huggingface cognition failed to init".into()),
                 )),
             }
         }
