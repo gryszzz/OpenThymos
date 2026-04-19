@@ -46,8 +46,8 @@ use thymos_policy::{PolicyEngine, WritAuthorityPolicy};
 use thymos_runtime::agent_async::ApprovalDecision;
 use thymos_runtime::{AgentRunOptions, AgentRunSummary, Runtime};
 use thymos_tools::{
-    DelegateTool, HttpTool, KvGetTool, KvSetTool, MemoryRecallTool, MemoryStoreTool, ShellTool,
-    ToolRegistry,
+    DelegateTool, FsPatchTool, FsReadTool, GrepTool, HttpTool, KvGetTool, KvSetTool, ListFilesTool,
+    MemoryRecallTool, MemoryStoreTool, RepoMapTool, ShellTool, TestRunTool, ToolRegistry,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +270,13 @@ fn build_runtime(ledger: Ledger) -> Arc<Runtime> {
     tools.register(DelegateTool::default());
     tools.register(ShellTool::default());
     tools.register(HttpTool::default());
+    // Coding-agent surface — repo-aware, path-confined.
+    tools.register(FsReadTool::default());
+    tools.register(FsPatchTool::default());
+    tools.register(ListFilesTool::default());
+    tools.register(RepoMapTool::default());
+    tools.register(GrepTool::default());
+    tools.register(TestRunTool::default());
 
     // To register MCP server tools at startup:
     //   tools.register_mcp_server("my-server", &["uvx", "my-mcp-server"])

@@ -1,4 +1,10 @@
-# Thymos API Reference
+---
+layout: default
+title: API Reference
+eyebrow: HTTP surface
+subtitle: axum over the Thymos runtime. JSON bodies, SSE streams, JWT or API-gateway auth.
+permalink: /api-reference/
+---
 
 Base URL: `http://localhost:3001` (default)
 

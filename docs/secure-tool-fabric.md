@@ -1,46 +1,77 @@
 ---
 layout: default
 title: Secure Tool Fabric
+eyebrow: Isolation
+subtitle: Risky tools don't run in the same process as the agent loop. They run behind a worker boundary with a typed contract.
+permalink: /secure-tool-fabric/
 ---
 
-# Secure Tool Fabric
+## Threat model
 
-Slice 2 moves Thymos away from trusted in-process execution for risky tools.
+The language model is an untrusted actor. The runtime must assume it will
+propose the worst possible shell command. The secure tool fabric makes that
+proposal's blast radius small and auditable.
 
-## Current shape
+## Architecture
 
-- `shell` and `http` execute through a worker request/response contract
-- `thymos-worker` provides a subprocess isolation boundary
-- shell execution is now THYMOS-native rather than a generic terminal wrapper
+```
+Runtime (trusted) ─┬─ ToolWorkerRequest ──▶ thymos-worker (subprocess)
+                   │                           │
+                   │                           ├─ timeout kill
+                   │                           ├─ capability gating
+                   │                           ├─ path confinement
+                   │                           └─ receipt-bearing response
+                   ◀────── ToolWorkerResponse ─┘
+```
 
-## THYMOS secure shell
+The runtime never executes the model's shell string itself. It serializes a
+`ToolWorkerRequest` and hands it to `thymos-worker`. The worker enforces the
+policy the request declares and returns a `ToolWorkerResponse` with an
+execution receipt.
 
-The shell now carries:
+## THYMOS-native shell
 
-- `purpose`
-- `capability_profile`
-- confined working directory roots
-- isolated `HOME` in restricted mode
-- real timeout enforcement with process kill
-- receipt-bearing observations with command digest and execution metadata
+The shell tool is not a thin `Command::new` wrapper. Every invocation carries:
 
-Profiles:
+- `purpose` — free-text rationale (goes into the ledger observation).
+- `capability_profile` — `inspect`, `build`, `mutate`, or `networked`.
+- `cwd` — confined to the writ's allowed roots.
+- `timeout_secs` — hard kill, not soft wait.
+- Isolated `HOME` when `isolate_home` is set.
+- Receipt — BLAKE3 digest of the canonical request payload.
 
-- `inspect`
-- `build`
-- `mutate`
-- `networked`
+### Profiles
 
-## Hardening now enforced
+| Profile    | Allows                                                                   |
+|------------|--------------------------------------------------------------------------|
+| `inspect`  | `ls`, `cat`, `rg`, `find`, `git`, `stat`, env / which, bounded viewing   |
+| `build`    | `inspect` + `cargo`, `rustc`, `make`, `npm`, `pnpm`, `yarn`, `go`, `pytest` |
+| `mutate`   | `build` + `cp`, `mv`, `mkdir`, `touch`, `chmod`, `rm`                    |
+| `networked`| any command (egress allowed). Used only behind explicit writ scope.      |
 
-- forbidden shell chaining sequences like `&&`, `||`, and `;`
-- profile-based command gating
-- path confinement under allowed roots
-- private and loopback host blocking for the HTTP tool by default
+Chaining sequences (`&&`, `||`, `;`) are rejected unless the profile's wrapper
+explicitly allows them. The model can't smuggle a second command through the
+first one.
+
+## HTTP tool
+
+The `http` tool shares the worker seam. It enforces:
+
+- Domain allowlist (when non-empty).
+- Private / loopback host blocking by default.
+- Per-call timeout.
+- Structured response: status, headers, body bytes.
+
+## Execution modes
+
+- **In-process** — runs the same request/response shape inside the runtime.
+  Fast, no isolation. The default in development.
+- **Worker** — `THYMOS_TOOL_FABRIC=worker` + `THYMOS_WORKER_BIN=<path>`.
+  Each invocation spawns a subprocess. Required in production mode.
 
 ## Next hardening steps
 
-- container or VM-backed workers
-- egress enforcement below the process layer
-- signed worker attestation
-- browser/code worker classes with per-capability sandboxes
+- Container- or microVM-backed workers.
+- Egress enforcement below the process layer.
+- Signed worker attestation.
+- Browser / code-exec worker classes with per-capability sandboxes.

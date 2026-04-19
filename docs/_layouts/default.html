@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    {% include head.html %}
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <div class="bg-glow" aria-hidden="true"></div>
+
+    {% include nav.html %}
+
+    <main class="page">
+      {% if page.hero == true %}
+        <div class="page-hero">
+          {{ content }}
+        </div>
+      {% else %}
+        <article class="prose">
+          {% if page.title and page.hide_title != true %}
+            <header class="prose-header">
+              {% if page.eyebrow %}<p class="eyebrow">{{ page.eyebrow }}</p>{% endif %}
+              <h1>{{ page.title }}</h1>
+              {% if page.subtitle %}<p class="subtitle">{{ page.subtitle }}</p>{% endif %}
+            </header>
+          {% endif %}
+          {{ content }}
+        </article>
+      {% endif %}
+    </main>
+
+    {% include footer.html %}
+
+    <script src="{{ '/assets/js/site.js' | relative_url }}" defer></script>
+  </body>
+</html>

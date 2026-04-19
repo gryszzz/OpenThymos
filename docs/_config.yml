@@ -1,8 +1,39 @@
 title: Thymos
-description: Governed execution substrate for code agents
-theme: minima
+tagline: The governed runtime for code agents.
+description: >-
+  Thymos is the governed execution substrate for code agents. Cognition
+  proposes. Runtime decides. Ledger remembers. Written in Rust. Ships with a
+  secure tool fabric, signed writs, a content-addressed trajectory ledger, and
+  pluggable cognition — Anthropic, OpenAI, or any local OpenAI-compatible
+  backend (LM Studio, Ollama, vLLM, llama.cpp).
+url: "https://gryszzz.github.io"
+baseurl: "/THYMOS"
+repo: "https://github.com/gryszzz/THYMOS"
+author: "Exponet Labs"
+
 markdown: kramdown
+kramdown:
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    block:
+      line_numbers: false
+
+permalink: /:basename/
+
 plugins:
   - jekyll-seo-tag
-minima:
-  social_links: []
+
+exclude:
+  - README.md
+  - Gemfile
+  - Gemfile.lock
+  - node_modules
+  - vendor
+  - launch-playbook.md
+  - monster-runtime-roadmap.md
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default

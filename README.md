@@ -4,16 +4,16 @@
 
 # 𝚃𝙷𝚈𝙼𝙾𝚂
                                                    
-**𝙰 𝚁𝚞𝚜𝚝 𝚛𝚞𝚗𝚝𝚒𝚖𝚎 𝚏𝚘𝚛 𝚐𝚘𝚟𝚎𝚛𝚗𝚎𝚍 𝙻𝙻𝙼 𝚊𝚐𝚎𝚗𝚝𝚜..**
+**𝚃𝚑𝚎 𝚐𝚘𝚟𝚎𝚛𝚗𝚎𝚍 𝚛𝚞𝚗𝚝𝚒𝚖𝚎 𝚏𝚘𝚛 𝚌𝚘𝚍𝚎 𝚊𝚐𝚎𝚗𝚝𝚜.**
 
 *𝘾𝙤𝙜𝙣𝙞𝙩𝙞𝙤𝙣 𝙥𝙧𝙤𝙥𝙤𝙨𝙚𝙨. 𝙍𝙪𝙣𝙩𝙞𝙢𝙚 𝙙𝙚𝙘𝙞𝙙𝙚𝙨. 𝙇𝙚𝙙𝙜𝙚𝙧 𝙧𝙚𝙢𝙚𝙢𝙗𝙚𝙧𝙨.*
 
 [![status](https://img.shields.io/badge/status-pre--alpha-orange)](#status)
 [![rust](https://img.shields.io/badge/rust-1.80%2B-orange)](https://www.rust-lang.org)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-93%20passing-brightgreen)](#tests)
+[![tests](https://img.shields.io/badge/tests-passing-brightgreen)](#tests)
 
-[Quickstart](#quickstart) · [Architecture](#architecture) · [Docs](thymos/docs) · [Examples](#examples) · [Status](#status)
+[Site](https://gryszzz.github.io/THYMOS/) · [Quickstart](#quickstart) · [Coding agent](#coding-agent) · [Architecture](#architecture) · [Docs](docs) · [Status](#status)
 
 </div>
 
@@ -24,6 +24,8 @@
 Most agent frameworks are a prompt loop plus a few tool calls. **Thymos treats a language model as a bounded proposer.** It emits typed **Intents**, the runtime compiles them into **Proposals**, a policy engine decides under a signed **Capability Writ**, and approved actions become **Commits** appended to an append-only, content-addressed **Trajectory Ledger**.
 
 No Writ — no commit. No commit — no side effect. Every step is auditable, bounded, and replayable.
+
+The first surface built on top of this is a **coding agent**: read files, patch files, list, map, grep, run tests — every call typed, path-confined, ledgered, and model-agnostic across Anthropic, OpenAI, LM Studio, Ollama, and any OpenAI-compatible local backend.
 
 ```
 Cognition (LLM)          Runtime            Ledger
@@ -103,27 +105,68 @@ docker compose up --build
 
 ---
 
+## Coding agent
+
+The runtime ships with a typed coding-tool surface. Each tool is path-confined
+to the configured allowed roots, returns a structured observation, and runs
+under the same writ/policy/ledger pipeline as every other Thymos action.
+
+| Tool          | Effect    | Risk    | What it does                                                      |
+| ------------- | --------- | ------- | ----------------------------------------------------------------- |
+| `repo_map`    | Read      | Low     | Top-level layout, build markers, Cargo workspace members          |
+| `list_files`  | Read      | Low     | Bounded directory walk (skips `target`, `node_modules`, `.git`)   |
+| `fs_read`     | Read      | Low     | File read with optional line range and a hard byte cap            |
+| `grep`        | Read      | Low     | Substring scan with optional extension filter                     |
+| `fs_patch`    | Write     | Medium  | `write` (full overwrite) or `replace` (unique-anchor substitute)  |
+| `test_run`    | External  | Medium  | Auto-detects `cargo` / `npm` / `pytest` / `go` and runs the suite |
+
+Drive it through the HTTP server with whichever model you prefer:
+
+```bash
+# LM Studio (free, local)
+curl -X POST http://localhost:3001/runs \
+  -H 'content-type: application/json' \
+  -d '{
+    "task": "Add a retry helper to crates/thymos-cognition/src/openai.rs and a unit test.",
+    "tool_scopes": ["repo_map","fs_read","fs_patch","grep","test_run"],
+    "cognition": {
+      "provider": "local",
+      "base_url": "http://localhost:1234/v1",
+      "model": "qwen2.5-coder-32b"
+    }
+  }'
+```
+
+The `replace` patch mode rejects anchors that appear zero or more than once,
+so the model can't quietly clobber unrelated code. Every patch and every test
+run becomes a ledger commit you can replay or audit.
+
+---
+
 ## Architecture
 
-Eleven Rust crates, each with a single responsibility. State flows one direction: the ledger is the source of truth, every other surface is a projection or a decision.
+Twelve Rust crates, each with a single responsibility. State flows one direction: the ledger is the source of truth, every other surface is a projection or a decision.
 
 ```
 thymos-core        types, hashing (BLAKE3), signing (Ed25519), invariants
 thymos-ledger      append-only content-addressed store (SQLite; Postgres stub)
 thymos-policy      policy trait + stock policies (writ authority, threshold)
-thymos-tools       ToolContract trait + stock tools (kv, memory, shell, http, delegate, MCP)
+thymos-tools       ToolContract trait + stock tools (kv, memory, shell, http, delegate, MCP, coding)
 thymos-compiler    Intent → Proposal compiler (writ resolution, policy eval, budget)
 thymos-cognition   LLM adapters (Anthropic, OpenAI, local OpenAI-compat, mock)
 thymos-runtime     agent loop, world projection, async streaming, approval channel
 thymos-server      axum HTTP facade, SSE streams, JWT + API gateway, run store
+thymos-worker      subprocess sandbox for risky tool execution
 thymos-marketplace tool-package registry
 thymos-cli         command-line client
 thymos-client      typed async Rust SDK
 ```
 
-Full architecture notes: [`thymos/docs/architecture.md`](thymos/docs/architecture.md).
-API reference: [`thymos/docs/api-reference.md`](thymos/docs/api-reference.md).
-Getting started: [`thymos/docs/getting-started.md`](thymos/docs/getting-started.md).
+Full architecture notes: [`docs/architecture.md`](docs/architecture.md).
+API reference: [`docs/api-reference.md`](docs/api-reference.md).
+Getting started: [`docs/getting-started.md`](docs/getting-started.md).
+Coding agent surface: [`docs/coding-agent.md`](docs/coding-agent.md).
+Secure tool fabric: [`docs/secure-tool-fabric.md`](docs/secure-tool-fabric.md).
 
 ---
 
@@ -212,6 +255,7 @@ Implemented and under test:
 - [x] SQLite-backed content-addressed ledger with parent chain
 - [x] Policy engine (allow / deny / suspend-for-approval)
 - [x] ToolContract trait + stock tools (kv, memory, shell w/ sandbox, http, delegate, MCP bridge, manifest)
+- [x] **Coding tool surface** (`fs_read`, `fs_patch`, `list_files`, `repo_map`, `grep`, `test_run`) with path confinement
 - [x] Intent → Proposal compiler with writ binding, policy eval, budget check
 - [x] Sync + async agent loop with approval callback and cancellation
 - [x] Multi-provider cognition (Anthropic, OpenAI, local, mock)
@@ -236,10 +280,11 @@ Not yet:
 ### Tests
 
 ```
-93 passing across the workspace
+~100 passing across the workspace
 ├─ 22 server E2E (JWT, gateway, audit, runs, delegations, tenant isolation)
 ├─ 12 JWT auth E2E
 ├─ 12 Opus 4.6 → 4.7 migration regression harness
+├─  5 coding tool sandbox + patch tests
 ├─ ledger, policy, compiler, runtime unit suites
 └─ cognition adapters (mock + anthropic + streaming)
 ```
@@ -255,13 +300,19 @@ cargo test --workspace
 ```
 THYMOS/
 ├── README.md                 ← you are here
-├── src/                      ← Next.js marketing site + trajectory viewer (/runs)
+├── docs/                     ← Jekyll site published to gryszzz.github.io/THYMOS/
+│   ├── index.md              ← landing
+│   ├── coding-agent.md       ← typed coding-tool surface
+│   ├── architecture.md       ← IPC triad, ledger, planes
+│   ├── secure-tool-fabric.md ← worker boundary + capability profiles
+│   ├── getting-started.md    ← five-step quickstart
+│   ├── api-reference.md      ← HTTP surface
+│   └── roadmap.md            ← Now / Next / After / Later
+├── src/                      ← Next.js marketing site + /runs trajectory viewer
 ├── public/                   ← site assets (thymos-mark.png)
-├── docs/                     ← commercial notes
 └── thymos/                   ← the Rust framework
     ├── Cargo.toml            ← workspace
-    ├── crates/               ← 11 crates
-    ├── docs/                 ← architecture, api-reference, getting-started
+    ├── crates/               ← 12 crates
     ├── Dockerfile            ← multi-stage server image
     └── docker-compose.yml    ← server + optional otel/jaeger/postgres
 ```
