@@ -1,7 +1,6 @@
-// Thymos VSCode extension — minimal bridge between VSCode and the Thymos
-// governed-cognition runtime. Uses the CLI for interactive work (opens a
-// terminal running `thymos shell`) and talks to the HTTP API directly for
-// programmatic flows (run + poll + approve with a native diff viewer).
+// Thymos VSCode extension — bridge between VSCode and the Thymos
+// governed-cognition runtime. Owns a webview panel that pops to the front
+// on each pending approval with inline Approve/Deny + Open Diff buttons.
 
 import * as vscode from "vscode";
 
@@ -48,6 +47,289 @@ async function httpJson(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Webview panel — the "popup" that shows streaming output and pops to front
+// on pending approvals with inline buttons.
+// ────────────────────────────────────────────────────────────────────────────
+
+class ThymosPanel {
+  private static current: ThymosPanel | undefined;
+  private readonly panel: vscode.WebviewPanel;
+  private pendingDecisions = new Map<string, (approved: boolean) => void>();
+  private disposables: vscode.Disposable[] = [];
+
+  static show(context: vscode.ExtensionContext): ThymosPanel {
+    if (ThymosPanel.current) {
+      ThymosPanel.current.panel.reveal(vscode.ViewColumn.Beside, true);
+      return ThymosPanel.current;
+    }
+    const panel = vscode.window.createWebviewPanel(
+      "thymos",
+      "Thymos",
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+      { enableScripts: true, retainContextWhenHidden: true },
+    );
+    ThymosPanel.current = new ThymosPanel(panel, context);
+    return ThymosPanel.current;
+  }
+
+  private constructor(
+    panel: vscode.WebviewPanel,
+    _context: vscode.ExtensionContext,
+  ) {
+    this.panel = panel;
+    this.panel.webview.html = this.render();
+
+    this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+
+    this.panel.webview.onDidReceiveMessage(
+      (msg) => this.onMessage(msg),
+      null,
+      this.disposables,
+    );
+  }
+
+  private dispose() {
+    ThymosPanel.current = undefined;
+    // Resolve any dangling approvals as denies so the run doesn't hang.
+    for (const resolve of this.pendingDecisions.values()) {
+      resolve(false);
+    }
+    this.pendingDecisions.clear();
+    while (this.disposables.length) {
+      const d = this.disposables.pop();
+      try {
+        d?.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  private onMessage(msg: any) {
+    if (msg.type === "decide") {
+      const resolve = this.pendingDecisions.get(msg.id);
+      if (resolve) {
+        this.pendingDecisions.delete(msg.id);
+        resolve(!!msg.approve);
+      }
+    } else if (msg.type === "openDiff") {
+      void vscode.commands.executeCommand(
+        "vscode.diff",
+        vscode.Uri.parse(msg.leftUri),
+        vscode.Uri.parse(msg.rightUri),
+        msg.title ?? "Thymos proposal",
+        { preview: true },
+      );
+    }
+  }
+
+  log(text: string, level: "info" | "warn" | "error" = "info") {
+    void this.panel.webview.postMessage({ type: "log", text, level });
+  }
+
+  runStarted(runId: string, task: string) {
+    void this.panel.webview.postMessage({ type: "run", runId, task });
+  }
+
+  statusChanged(status: string) {
+    void this.panel.webview.postMessage({ type: "status", status });
+  }
+
+  finalAnswer(text: string) {
+    void this.panel.webview.postMessage({ type: "final", text });
+  }
+
+  reveal() {
+    this.panel.reveal(vscode.ViewColumn.Beside, false);
+  }
+
+  /** Show an approval card and resolve when the user clicks Approve/Deny. */
+  promptApproval(card: {
+    id: string;
+    channel: string;
+    reason: string;
+    tool?: string;
+    path?: string;
+    mode?: string;
+    lineDelta?: { removed: number; added: number };
+    argsPreview?: string;
+    diffUri?: { leftUri: string; rightUri: string; title: string };
+  }): Promise<boolean> {
+    this.reveal();
+    return new Promise<boolean>((resolve) => {
+      this.pendingDecisions.set(card.id, resolve);
+      void this.panel.webview.postMessage({ type: "approval", card });
+    });
+  }
+
+  private render(): string {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<style>
+  body {
+    font-family: var(--vscode-font-family);
+    font-size: 13px;
+    color: var(--vscode-editor-foreground);
+    background: var(--vscode-editor-background);
+    padding: 12px;
+  }
+  h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+  #header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
+    padding-bottom: 8px; margin-bottom: 12px;
+  }
+  #status { font-size: 12px; color: var(--vscode-descriptionForeground); }
+  .row { margin: 4px 0; white-space: pre-wrap; word-break: break-word; }
+  .row.warn { color: var(--vscode-editorWarning-foreground); }
+  .row.error { color: var(--vscode-editorError-foreground); }
+  .card {
+    border: 1px solid var(--vscode-focusBorder);
+    border-radius: 6px;
+    padding: 12px;
+    margin: 14px 0;
+    background: var(--vscode-editorWidget-background);
+  }
+  .card h3 {
+    margin: 0 0 6px; font-size: 13px; font-weight: 600;
+    color: var(--vscode-editorWarning-foreground);
+  }
+  .kv { display: grid; grid-template-columns: 80px 1fr; gap: 2px 10px; margin-bottom: 8px; }
+  .kv span:nth-child(odd) { color: var(--vscode-descriptionForeground); }
+  .actions { display: flex; gap: 8px; margin-top: 10px; }
+  button {
+    font-family: inherit; font-size: 12px; padding: 6px 14px;
+    border-radius: 4px; border: none; cursor: pointer;
+  }
+  button.approve {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+  }
+  button.approve:hover { background: var(--vscode-button-hoverBackground); }
+  button.deny {
+    background: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+  }
+  button.deny:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  button.diff { background: transparent; color: var(--vscode-textLink-foreground); }
+  button.diff:hover { text-decoration: underline; }
+  pre.args {
+    margin: 6px 0 0; padding: 8px; border-radius: 4px;
+    background: var(--vscode-textCodeBlock-background);
+    font-family: var(--vscode-editor-font-family);
+    font-size: 12px; overflow-x: auto; max-height: 180px;
+  }
+  .final {
+    margin-top: 14px; padding: 10px;
+    border-left: 3px solid var(--vscode-textLink-foreground);
+    background: var(--vscode-editorWidget-background);
+  }
+  .final h3 { margin: 0 0 6px; font-size: 12px; }
+</style>
+</head>
+<body>
+  <div id="header">
+    <h2>🧠 Thymos</h2>
+    <div id="status">idle</div>
+  </div>
+  <div id="log"></div>
+  <script>
+    const vscode = acquireVsCodeApi();
+    const log = document.getElementById("log");
+    const status = document.getElementById("status");
+
+    function appendRow(text, level) {
+      const div = document.createElement("div");
+      div.className = "row" + (level && level !== "info" ? " " + level : "");
+      div.textContent = text;
+      log.appendChild(div);
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function appendCard(card) {
+      const div = document.createElement("div");
+      div.className = "card";
+      div.id = "card-" + card.id;
+      const delta = card.lineDelta
+        ? (" (−" + card.lineDelta.removed + " +" + card.lineDelta.added + ")")
+        : "";
+      const diffButton = card.diffUri
+        ? '<button class="diff" data-action="diff">Open diff editor</button>'
+        : "";
+      div.innerHTML = \`
+        <h3>⚠️ Approval requested — \${escape(card.channel)}</h3>
+        <div class="kv">
+          <span>reason</span><span>\${escape(card.reason)}</span>
+          \${card.tool ? "<span>tool</span><span>" + escape(card.tool) + "</span>" : ""}
+          \${card.path ? "<span>path</span><span>" + escape(card.path) + delta + "</span>" : ""}
+          \${card.mode ? "<span>mode</span><span>" + escape(card.mode) + "</span>" : ""}
+        </div>
+        \${card.argsPreview ? "<pre class=\\"args\\">" + escape(card.argsPreview) + "</pre>" : ""}
+        <div class="actions">
+          <button class="approve" data-action="approve">Approve</button>
+          <button class="deny" data-action="deny">Deny</button>
+          \${diffButton}
+        </div>
+      \`;
+      div.querySelectorAll("button").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          const action = e.target.getAttribute("data-action");
+          if (action === "approve" || action === "deny") {
+            vscode.postMessage({ type: "decide", id: card.id, approve: action === "approve" });
+            div.querySelectorAll("button").forEach((b) => (b.disabled = true));
+            const tag = document.createElement("div");
+            tag.className = "row";
+            tag.textContent = action === "approve" ? "  → approved" : "  → denied";
+            div.appendChild(tag);
+          } else if (action === "diff" && card.diffUri) {
+            vscode.postMessage({
+              type: "openDiff",
+              leftUri: card.diffUri.leftUri,
+              rightUri: card.diffUri.rightUri,
+              title: card.diffUri.title,
+            });
+          }
+        });
+      });
+      log.appendChild(div);
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function escape(s) {
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    window.addEventListener("message", (e) => {
+      const msg = e.data;
+      if (msg.type === "log") {
+        appendRow(msg.text, msg.level);
+      } else if (msg.type === "run") {
+        appendRow("▶ run " + msg.runId + " — " + msg.task, "info");
+      } else if (msg.type === "status") {
+        status.textContent = msg.status;
+      } else if (msg.type === "approval") {
+        appendCard(msg.card);
+      } else if (msg.type === "final") {
+        const div = document.createElement("div");
+        div.className = "final";
+        div.innerHTML = '<h3>Final answer</h3><div class="row"></div>';
+        div.querySelector(".row").textContent = msg.text;
+        log.appendChild(div);
+        window.scrollTo(0, document.body.scrollHeight);
+      }
+    });
+  </script>
+</body>
+</html>`;
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Status bar: live health indicator.
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -70,7 +352,7 @@ async function refreshHealth(): Promise<void> {
         "statusBarItem.warningBackground",
       );
     }
-  } catch (e) {
+  } catch {
     statusItem.text = "$(debug-disconnect) Thymos";
     statusItem.tooltip = `Thymos unreachable — ${cfg.url}`;
     statusItem.backgroundColor = new vscode.ThemeColor(
@@ -95,7 +377,6 @@ function cmdOpenShell() {
     },
   });
   terminal.show();
-  // Pre-configure the shell for coding work against this workspace.
   terminal.sendText(`${cfg.cliPath} shell`);
   if (cwd) {
     terminal.sendText(`set preset ${cfg.preset}`);
@@ -121,11 +402,13 @@ async function cmdHealth() {
   }
 }
 
-async function cmdRunTask(output: vscode.OutputChannel) {
+async function cmdRunTask(context: vscode.ExtensionContext) {
   const cfg = getConfig();
   const cwd = workspaceRoot();
   if (!cwd) {
-    vscode.window.showErrorMessage("Open a folder before running a Thymos task.");
+    vscode.window.showErrorMessage(
+      "Open a folder before running a Thymos task.",
+    );
     return;
   }
 
@@ -136,8 +419,9 @@ async function cmdRunTask(output: vscode.OutputChannel) {
   });
   if (!task) return;
 
-  output.show(true);
-  output.appendLine(`[thymos] submitting: ${task}`);
+  const panel = ThymosPanel.show(context);
+  panel.log(`submitting: ${task}`);
+  panel.statusChanged("submitting");
 
   const { status, body } = await httpJson(`${cfg.url}/runs`, {
     method: "POST",
@@ -164,22 +448,21 @@ async function cmdRunTask(output: vscode.OutputChannel) {
   });
 
   if (status >= 400 || !body?.run_id) {
-    output.appendLine(`[thymos] error ${status}: ${JSON.stringify(body)}`);
+    panel.log(`error ${status}: ${JSON.stringify(body)}`, "error");
     vscode.window.showErrorMessage(`Thymos run failed: ${status}`);
     return;
   }
 
   const runId: string = body.run_id;
-  output.appendLine(`[thymos] run: ${runId}`);
-
-  await pollRunToTerminal(cfg, runId, cwd, output);
+  panel.runStarted(runId, task);
+  await pollRun(cfg, runId, cwd, panel);
 }
 
-async function pollRunToTerminal(
+async function pollRun(
   cfg: Config,
   runId: string,
   cwd: string,
-  output: vscode.OutputChannel,
+  panel: ThymosPanel,
 ): Promise<void> {
   const handled = new Set<number>();
   let lastStatus: string | null = null;
@@ -190,13 +473,14 @@ async function pollRunToTerminal(
     });
     const st: string = status.body?.status ?? "?";
     if (st !== lastStatus) {
-      output.appendLine(`[thymos] status: ${st}`);
+      panel.statusChanged(st);
+      panel.log(`status: ${st}`);
       lastStatus = st;
     }
     if (st === "completed" || st === "failed" || st === "cancelled") {
       const final = status.body?.summary?.final_answer;
       if (final) {
-        output.appendLine(`\n── final answer ──\n${final}\n`);
+        panel.finalAnswer(final);
       }
       return;
     }
@@ -208,17 +492,16 @@ async function pollRunToTerminal(
     const pending: any[] = entries.body?.entries ?? [];
     for (const entry of pending) {
       if (handled.has(entry.seq)) continue;
-      const approved = await reviewPendingApproval(cfg, cwd, entry, output);
+      const approved = await handleApproval(cfg, cwd, entry, panel);
       const channel: string = entry.detail?.channel ?? "";
-      if (!channel) continue;
-      await httpJson(`${cfg.url}/runs/${runId}/approvals/${channel}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders(cfg) },
-        body: JSON.stringify({ approve: approved }),
-      });
-      output.appendLine(
-        `[thymos] ${approved ? "approved" : "denied"} channel=${channel}`,
-      );
+      if (channel) {
+        await httpJson(`${cfg.url}/runs/${runId}/approvals/${channel}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders(cfg) },
+          body: JSON.stringify({ approve: approved }),
+        });
+        panel.log(`${approved ? "approved" : "denied"} channel=${channel}`);
+      }
       handled.add(entry.seq);
     }
 
@@ -227,16 +510,14 @@ async function pollRunToTerminal(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Approval review — if the proposal is an fs_patch, show a native VSCode
-// diff editor between the on-disk file and the proposed content, and use
-// the modal dialog for the decision.
+// Approval card + native diff support.
 // ────────────────────────────────────────────────────────────────────────────
 
-async function reviewPendingApproval(
+async function handleApproval(
   cfg: Config,
   cwd: string,
   entry: any,
-  output: vscode.OutputChannel,
+  panel: ThymosPanel,
 ): Promise<boolean> {
   const channel: string = entry.detail?.channel ?? "?";
   const reason: string = entry.detail?.reason ?? "(no reason)";
@@ -244,77 +525,61 @@ async function reviewPendingApproval(
   const tool: string | undefined = proposal?.body?.plan?.tool;
   const args = proposal?.body?.plan?.args ?? {};
 
-  output.appendLine(
-    `[thymos] approval requested — channel=${channel} tool=${tool} reason=${reason}`,
-  );
+  const card: any = {
+    id: `${entry.seq}`,
+    channel,
+    reason,
+    tool,
+  };
 
   if (tool === "fs_patch") {
-    const ok = await showFsPatchDiff(cwd, args);
-    if (ok !== undefined) return ok;
-  }
+    const path: string | undefined = args.path;
+    const mode: string | undefined = args.mode;
+    card.path = path;
+    card.mode = mode;
 
-  const choice = await vscode.window.showInformationMessage(
-    `Thymos approval — ${tool ?? "tool"}: ${reason}`,
-    { modal: true, detail: JSON.stringify(args, null, 2) },
-    "Approve",
-    "Deny",
-  );
-  return choice === "Approve";
-}
+    if (path && mode) {
+      const absolute = path.startsWith("/") ? path : `${cwd}/${path}`;
+      const fileUri = vscode.Uri.file(absolute);
 
-async function showFsPatchDiff(
-  cwd: string,
-  args: any,
-): Promise<boolean | undefined> {
-  const path: string | undefined = args.path;
-  const mode: string | undefined = args.mode;
-  if (!path || !mode) return undefined;
+      let current = "";
+      try {
+        const buf = await vscode.workspace.fs.readFile(fileUri);
+        current = Buffer.from(buf).toString("utf8");
+      } catch {
+        current = "";
+      }
 
-  const absolute = path.startsWith("/") ? path : `${cwd}/${path}`;
-  const fileUri = vscode.Uri.file(absolute);
+      let proposed = current;
+      if (mode === "write") {
+        proposed = args.content ?? "";
+      } else if (mode === "replace") {
+        const anchor: string = args.anchor ?? "";
+        const replacement: string = args.replacement ?? "";
+        const occurrences = anchor ? current.split(anchor).length - 1 : 0;
+        proposed = occurrences === 1 ? current.replace(anchor, replacement) : replacement;
+      }
 
-  let proposed: string;
-  if (mode === "write") {
-    proposed = args.content ?? "";
-  } else if (mode === "replace") {
-    let current = "";
-    try {
-      const buf = await vscode.workspace.fs.readFile(fileUri);
-      current = Buffer.from(buf).toString("utf8");
-    } catch {
-      current = "";
-    }
-    const anchor: string = args.anchor ?? "";
-    const replacement: string = args.replacement ?? "";
-    const occurrences = anchor ? current.split(anchor).length - 1 : 0;
-    if (occurrences === 1) {
-      proposed = current.replace(anchor, replacement);
-    } else {
-      proposed = replacement;
+      card.lineDelta = {
+        removed: current.split("\n").length,
+        added: proposed.split("\n").length,
+      };
+
+      const proposedDoc = await vscode.workspace.openTextDocument({
+        content: proposed,
+        language: languageFor(path),
+      });
+      card.diffUri = {
+        leftUri: fileUri.toString(),
+        rightUri: proposedDoc.uri.toString(),
+        title: `Thymos proposal: ${path}`,
+      };
     }
   } else {
-    return undefined;
+    card.argsPreview = JSON.stringify(args, null, 2);
   }
 
-  const doc = await vscode.workspace.openTextDocument({
-    content: proposed,
-    language: languageFor(path),
-  });
-  await vscode.commands.executeCommand(
-    "vscode.diff",
-    fileUri,
-    doc.uri,
-    `Thymos proposal: ${path}`,
-    { preview: true },
-  );
-
-  const choice = await vscode.window.showInformationMessage(
-    `Apply ${mode} to ${path}?`,
-    { modal: true },
-    "Approve",
-    "Deny",
-  );
-  return choice === "Approve";
+  return panel.promptApproval(card);
 }
 
 function languageFor(path: string): string {
@@ -329,7 +594,7 @@ function languageFor(path: string): string {
   return "plaintext";
 }
 
-async function cmdReviewPending() {
+async function cmdReviewPending(context: vscode.ExtensionContext) {
   const cfg = getConfig();
   const runId = await vscode.window.showInputBox({
     prompt: "Run ID to review",
@@ -345,10 +610,10 @@ async function cmdReviewPending() {
     vscode.window.showInformationMessage("No pending approvals for that run.");
     return;
   }
-  const output = vscode.window.createOutputChannel("Thymos");
+  const panel = ThymosPanel.show(context);
   const cwd = workspaceRoot() ?? "";
   for (const entry of pending) {
-    const approved = await reviewPendingApproval(cfg, cwd, entry, output);
+    const approved = await handleApproval(cfg, cwd, entry, panel);
     const channel: string = entry.detail?.channel ?? "";
     if (!channel) continue;
     await httpJson(`${cfg.url}/runs/${runId}/approvals/${channel}`, {
@@ -364,8 +629,6 @@ async function cmdReviewPending() {
 // ────────────────────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext) {
-  const output = vscode.window.createOutputChannel("Thymos");
-
   statusItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
     100,
@@ -378,8 +641,15 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("thymos.openShell", cmdOpenShell),
     vscode.commands.registerCommand("thymos.health", cmdHealth),
-    vscode.commands.registerCommand("thymos.runTask", () => cmdRunTask(output)),
-    vscode.commands.registerCommand("thymos.reviewPending", cmdReviewPending),
+    vscode.commands.registerCommand("thymos.runTask", () =>
+      cmdRunTask(context),
+    ),
+    vscode.commands.registerCommand("thymos.reviewPending", () =>
+      cmdReviewPending(context),
+    ),
+    vscode.commands.registerCommand("thymos.showPanel", () =>
+      ThymosPanel.show(context),
+    ),
   );
 
   refreshHealth();

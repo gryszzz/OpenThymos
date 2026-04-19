@@ -31,6 +31,11 @@
         "command": "thymos.reviewPending",
         "title": "Thymos: Review Pending Approval",
         "category": "Thymos"
+      },
+      {
+        "command": "thymos.showPanel",
+        "title": "Thymos: Show Panel",
+        "category": "Thymos"
       }
     ],
     "configuration": {
