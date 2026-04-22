@@ -198,6 +198,7 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
     color-scheme: dark;
   }
   body {
+    position: relative;
     font-family: var(--vscode-font-family);
     font-size: 13px;
     color: #e8eef7;
@@ -206,11 +207,27 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
       linear-gradient(180deg, #0b1017 0%, #090d13 100%);
     padding: 12px;
   }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background:
+      linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+    background-size: 44px 44px;
+    opacity: 0.24;
+    mask-image: linear-gradient(180deg, rgba(0,0,0,0.78), transparent);
+  }
   #shell {
+    position: relative;
+    z-index: 1;
     display: grid;
     gap: 12px;
   }
   .panel {
+    position: relative;
+    overflow: hidden;
     border-radius: 14px;
     border: 1px solid rgba(148, 163, 184, 0.16);
     background:
@@ -218,8 +235,21 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
       rgba(10, 15, 22, 0.92);
     box-shadow: 0 18px 44px rgba(0,0,0,0.22);
   }
+  .panel::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      linear-gradient(135deg, rgba(255,255,255,0.04), transparent 32%),
+      radial-gradient(circle at top right, rgba(88, 155, 255, 0.08), transparent 30%);
+  }
   #header {
     padding: 14px;
+  }
+  #header > * {
+    position: relative;
+    z-index: 1;
   }
   #eyebrow {
     color: rgba(139, 180, 255, 0.88);
@@ -234,13 +264,26 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
     font-size: 16px;
     font-weight: 700;
   }
+  #consoleStrip {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(88, 155, 255, 0.16);
+    background: rgba(5, 11, 18, 0.64);
+    color: rgba(214, 225, 240, 0.72);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
   #task {
     margin-top: 8px;
-    color: rgba(214, 225, 240, 0.82);
+    color: rgba(214, 225, 240, 0.86);
     line-height: 1.55;
+    min-height: 42px;
   }
   #statusline {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     gap: 12px;
     margin-top: 12px;
@@ -261,13 +304,47 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
     letter-spacing: 0.12em;
     text-transform: uppercase;
   }
+  #status.status-running {
+    border-color: rgba(88, 155, 255, 0.22);
+    background: rgba(88, 155, 255, 0.08);
+    color: #cfe0ff;
+  }
+  #status.status-completed {
+    border-color: rgba(52, 211, 153, 0.24);
+    background: rgba(52, 211, 153, 0.12);
+    color: #d4ffe8;
+  }
+  #status.status-waiting_approval {
+    border-color: rgba(245, 158, 11, 0.24);
+    background: rgba(245, 158, 11, 0.12);
+    color: #ffebb9;
+  }
+  #status.status-failed {
+    border-color: rgba(248, 113, 113, 0.24);
+    background: rgba(248, 113, 113, 0.12);
+    color: #ffd5d5;
+  }
+  #status.status-cancelled {
+    border-color: rgba(148, 163, 184, 0.22);
+    background: rgba(148, 163, 184, 0.12);
+    color: #d7deea;
+  }
+  #phase {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    background: rgba(255,255,255,0.03);
+  }
   #metrics {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 8px;
     padding: 0 14px 14px;
   }
   .metric {
+    position: relative;
     border-radius: 12px;
     border: 1px solid rgba(148, 163, 184, 0.14);
     background: rgba(255,255,255,0.03);
@@ -293,21 +370,32 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
     font-weight: 600;
     margin-bottom: 10px;
   }
+  #log {
+    max-height: 52vh;
+    overflow: auto;
+    padding-right: 4px;
+  }
   #log, #approvals {
     display: grid;
     gap: 10px;
   }
   .log-entry {
+    position: relative;
     border-radius: 12px;
     border: 1px solid rgba(148, 163, 184, 0.14);
     background: rgba(255,255,255,0.03);
     padding: 12px;
   }
+  .log-entry.level-info { border-color: rgba(88, 155, 255, 0.2); }
+  .log-entry.level-success { border-color: rgba(52, 211, 153, 0.2); }
+  .log-entry.level-warning { border-color: rgba(245, 158, 11, 0.22); }
+  .log-entry.level-error { border-color: rgba(248, 113, 113, 0.22); }
   .log-top {
     display: flex;
     gap: 8px;
     align-items: center;
     margin-bottom: 8px;
+    flex-wrap: wrap;
   }
   .phase {
     display: inline-flex;
@@ -324,6 +412,7 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
   .log-title {
     font-weight: 700;
     color: #eef4fb;
+    flex: 1 1 auto;
   }
   .log-detail {
     color: rgba(214, 225, 240, 0.78);
@@ -353,9 +442,12 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
   }
   .card {
     border: 1px solid rgba(245, 158, 11, 0.28);
-    border-radius: 12px;
-    padding: 12px;
-    background: rgba(34, 24, 8, 0.34);
+    border-radius: 14px;
+    padding: 14px;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.04), transparent 16%),
+      rgba(34, 24, 8, 0.42);
+    box-shadow: 0 16px 38px rgba(0,0,0,0.22);
   }
   .card h3 {
     margin: 0 0 6px;
@@ -369,8 +461,8 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
   .kv span:nth-child(odd) { color: rgba(201, 212, 225, 0.72); }
   .actions { display: flex; gap: 8px; margin-top: 10px; }
   button {
-    font-family: inherit; font-size: 12px; padding: 6px 14px;
-    border-radius: 4px; border: none; cursor: pointer;
+    font-family: inherit; font-size: 12px; padding: 7px 14px;
+    border-radius: 999px; border: none; cursor: pointer;
   }
   button.approve {
     background: var(--vscode-button-background);
@@ -391,8 +483,8 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
     font-size: 12px; overflow-x: auto; max-height: 180px;
   }
   .final {
-    padding: 12px;
-    border-radius: 12px;
+    padding: 14px;
+    border-radius: 14px;
     border: 1px solid rgba(52, 211, 153, 0.24);
     background: rgba(5, 27, 20, 0.42);
   }
@@ -404,6 +496,7 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
     <div id="header" class="panel">
       <div id="eyebrow">Thymos Runtime</div>
       <h2>Unified VS Code operator console</h2>
+      <div id="consoleStrip">Intent → Proposal → Execution → Result</div>
       <div id="task">Waiting for a run...</div>
       <div id="statusline">
         <div id="status">idle</div>
@@ -414,6 +507,7 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
       <div class="metric"><div class="label">Step</div><div class="value" id="metric-step">0/0</div></div>
       <div class="metric"><div class="label">Commits</div><div class="value" id="metric-commits">0</div></div>
       <div class="metric"><div class="label">Recoveries</div><div class="value" id="metric-recoveries">0</div></div>
+      <div class="metric"><div class="label">Tool</div><div class="value" id="metric-tool">standby</div></div>
     </div>
     <div id="runtime" class="panel">
       <div id="operator">Thymos is ready.</div>
@@ -432,6 +526,7 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
     const metricStep = document.getElementById("metric-step");
     const metricCommits = document.getElementById("metric-commits");
     const metricRecoveries = document.getElementById("metric-recoveries");
+    const metricTool = document.getElementById("metric-tool");
 
     function appendCard(card) {
       const div = document.createElement("div");
@@ -444,7 +539,7 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
         ? '<button class="diff" data-action="diff">Open diff editor</button>'
         : "";
       div.innerHTML = \`
-        <h3>⚠️ Approval requested — \${escape(card.channel)}</h3>
+        <h3>Approval requested — \${escape(card.channel)}</h3>
         <div class="kv">
           <span>reason</span><span>\${escape(card.reason)}</span>
           \${card.tool ? "<span>tool</span><span>" + escape(card.tool) + "</span>" : ""}
@@ -485,11 +580,13 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
     function renderSnapshot(session) {
       task.textContent = session.task || "Waiting for a run...";
       status.textContent = session.status.replace(/_/g, " ");
+      status.className = "status-" + session.status;
       phase.textContent = "phase: " + session.phase;
       operator.textContent = session.operator_state || "Runtime active";
       metricStep.textContent = String(session.current_step || 0) + "/" + String(session.max_steps || 0);
       metricCommits.textContent = String(session.counters?.commits ?? 0);
       metricRecoveries.textContent = String((session.counters?.recoveries ?? 0) + (session.counters?.failures ?? 0));
+      metricTool.textContent = session.active_tool || "standby";
 
       if (!Array.isArray(session.log) || session.log.length === 0) {
         log.className = "empty";
@@ -499,7 +596,7 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
         log.innerHTML = "";
         for (const entry of session.log) {
           const div = document.createElement("article");
-          div.className = "log-entry";
+          div.className = "log-entry level-" + entry.level;
           const chips = [];
           if (entry.step_index !== undefined) chips.push("step " + (entry.step_index + 1));
           if (entry.tool) chips.push(entry.tool);
@@ -532,6 +629,10 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
       } else if (msg.type === "run") {
         task.textContent = msg.task;
         status.textContent = "running";
+        status.className = "status-running";
+      } else if (msg.type === "status") {
+        status.textContent = String(msg.status || "running").replace(/_/g, " ");
+        status.className = "status-" + String(msg.status || "running");
       } else if (msg.type === "approval") {
         appendCard(msg.card);
       } else if (msg.type === "final") {

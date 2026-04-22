@@ -5,9 +5,10 @@ import type { CognitionEvent } from "@/lib/thymos-api";
 export function StreamView({ events }: { events: CognitionEvent[] }) {
   if (events.length === 0) {
     return (
-      <p style={{ color: "#a1a1aa", fontStyle: "italic" }}>
-        Waiting for cognition stream...
-      </p>
+      <div className="thymos-empty-state">
+        <strong>Model Stream Waiting</strong>
+        <p>Waiting for cognition stream...</p>
+      </div>
     );
   }
 
@@ -35,39 +36,16 @@ export function StreamView({ events }: { events: CognitionEvent[] }) {
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <div className="thymos-resource-list">
       {text && (
-        <pre
-          style={{
-            background: "#18181b",
-            border: "1px solid #27272a",
-            borderRadius: 6,
-            padding: 12,
-            color: "#d4d4d8",
-            fontSize: 13,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            maxHeight: 400,
-            overflow: "auto",
-          }}
-        >
-          {text}
-        </pre>
+        <div className="thymos-stream-block">
+          <pre>{text}</pre>
+        </div>
       )}
       {toolUses.length > 0 && (
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <div className="thymos-chip-row">
           {toolUses.map((t) => (
-            <span
-              key={t.id}
-              style={{
-                background: "#7c3aed",
-                color: "#fff",
-                padding: "2px 8px",
-                borderRadius: 4,
-                fontSize: 11,
-                fontWeight: 600,
-              }}
-            >
+            <span key={t.id} className="thymos-chip">
               {t.tool}
             </span>
           ))}

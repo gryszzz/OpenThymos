@@ -39,71 +39,47 @@ function formatTime(timestampMs: number) {
 
 export function ExecutionLog({ session }: { session: ExecutionSession | null }) {
   if (!session) {
-    return <p style={{ color: "rgba(201, 212, 225, 0.72)" }}>Connecting to Thymos runtime...</p>;
+    return (
+      <div className="thymos-empty-state">
+        <strong>Runtime Linking</strong>
+        <p>Connecting to Thymos runtime...</p>
+      </div>
+    );
   }
 
   if (session.log.length === 0) {
-    return <p style={{ color: "rgba(201, 212, 225, 0.72)" }}>Execution log is waiting for the first runtime event.</p>;
+    return (
+      <div className="thymos-empty-state">
+        <strong>Execution Log Waiting</strong>
+        <p>Execution log is waiting for the first runtime event.</p>
+      </div>
+    );
   }
 
   return (
-    <div style={{ display: "grid", gap: 12 }}>
+    <div className="thymos-log-list">
       {session.log.map((entry) => {
         const style = levelStyles[entry.level];
         return (
           <article
             key={entry.idx}
-            style={{
-              border: `1px solid ${style.border}`,
-              borderRadius: 16,
-              padding: "14px 16px",
-              background:
-                "linear-gradient(180deg, rgba(255,255,255,0.04), transparent 16%), rgba(10,14,21,0.88)",
-              boxShadow: "0 18px 44px rgba(0,0,0,0.22)",
-            }}
+            className="thymos-log-entry"
+            data-level={entry.level}
           >
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 10,
-                alignItems: "center",
-                marginBottom: 10,
-              }}
-            >
+            <div className="thymos-log-head">
               <span
-                style={{
-                  padding: "4px 9px",
-                  borderRadius: 999,
-                  background: style.badge,
-                  color: style.text,
-                  fontSize: 11,
-                  letterSpacing: "0.12em",
-                  textTransform: "uppercase",
-                  fontWeight: 700,
-                }}
+                className="thymos-chip thymos-chip--phase"
+                style={{ borderColor: style.border, background: style.badge, color: style.text }}
               >
                 {phaseLabel(entry.phase)}
               </span>
-              <strong style={{ color: "#eef4fb", fontSize: 14 }}>{entry.title}</strong>
-              <span style={{ color: "rgba(150, 163, 181, 0.88)", fontSize: 12, marginLeft: "auto" }}>
-                {formatTime(entry.timestamp_ms)}
-              </span>
+              <strong className="thymos-log-title">{entry.title}</strong>
+              <span className="thymos-log-meta">{formatTime(entry.timestamp_ms)}</span>
             </div>
 
-            <p
-              style={{
-                margin: 0,
-                color: "rgba(223, 232, 243, 0.84)",
-                lineHeight: 1.6,
-                fontSize: 13,
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {entry.detail}
-            </p>
+            <p className="thymos-log-copy">{entry.detail}</p>
 
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+            <div className="thymos-chip-row" style={{ marginTop: 12 }}>
               {entry.step_index !== undefined && (
                 <LogChip label={`step ${entry.step_index + 1}`} />
               )}
@@ -119,18 +95,5 @@ export function ExecutionLog({ session }: { session: ExecutionSession | null }) 
 }
 
 function LogChip({ label }: { label: string }) {
-  return (
-    <span
-      style={{
-        borderRadius: 999,
-        border: "1px solid rgba(146, 163, 184, 0.18)",
-        padding: "4px 8px",
-        color: "rgba(201, 212, 225, 0.82)",
-        fontSize: 11,
-        background: "rgba(255,255,255,0.03)",
-      }}
-    >
-      {label}
-    </span>
-  );
+  return <span className="thymos-chip">{label}</span>;
 }

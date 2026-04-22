@@ -109,7 +109,9 @@ async fn run_interactive(
         let _ = rl.load_history(path);
     }
 
-    println!("Thymos shell — {}", url);
+    println!("Thymos shell — shared execution runtime");
+    println!("endpoint: {}", url);
+    println!("mode: intent -> proposal -> execution -> result");
     println!("type `help` for commands, `exit` to leave.");
 
     loop {
@@ -551,7 +553,8 @@ Thymos shell commands:
   exit | quit                   leave the shell
 
 Tokens: `$last` expands to the most recent run id.
-Lines starting with `#` are comments."
+Lines starting with `#` are comments.
+The shell attaches to the same Thymos runtime the web console and VS Code sidebar use."
     );
 }
 
