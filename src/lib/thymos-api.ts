@@ -14,6 +14,7 @@ export interface RunSummary {
   intents_submitted: number;
   commits: number;
   rejections: number;
+  failures: number;
   final_answer?: string;
   terminated_by: string;
 }
@@ -47,6 +48,49 @@ export interface CognitionEvent {
   intents_count?: number;
   final_answer?: string;
   message?: string;
+}
+
+export interface ExecutionCounters {
+  steps_started: number;
+  intents_declared: number;
+  proposals_staged: number;
+  commits: number;
+  rejections: number;
+  failures: number;
+  recoveries: number;
+  retries: number;
+  approvals_pending: number;
+}
+
+export interface ExecutionLogEntry {
+  idx: number;
+  timestamp_ms: number;
+  phase: "system" | "intent" | "proposal" | "execution" | "result";
+  level: "info" | "success" | "warning" | "error";
+  title: string;
+  detail: string;
+  step_index?: number;
+  tool?: string;
+  intent_id?: string;
+  proposal_id?: string;
+  commit_id?: string;
+  seq?: number;
+}
+
+export interface ExecutionSession {
+  run_id: string;
+  task: string;
+  trajectory_id?: string;
+  status: "running" | "waiting_approval" | "completed" | "failed" | "cancelled";
+  phase: "system" | "intent" | "proposal" | "execution" | "result";
+  operator_state: string;
+  current_step: number;
+  max_steps: number;
+  active_tool?: string;
+  final_answer?: string;
+  counters: ExecutionCounters;
+  updated_at_ms: number;
+  log: ExecutionLogEntry[];
 }
 
 /** Cognition provider selection for multi-model support. */
@@ -90,6 +134,12 @@ export async function createRun(
 export async function getRun(id: string) {
   const res = await fetch(`${BASE}/runs/${id}`);
   return res.json() as Promise<RunRecord>;
+}
+
+/** GET /runs/:id/execution — get unified execution session state. */
+export async function getExecution(id: string) {
+  const res = await fetch(`${BASE}/runs/${id}/execution`);
+  return res.json() as Promise<ExecutionSession>;
 }
 
 /** GET /runs/:id/world — get world projection. */
@@ -166,6 +216,27 @@ export function subscribeStream(
     });
   }
 
+  es.onerror = () => {
+    es.close();
+    onDone?.();
+  };
+  return es;
+}
+
+/** Subscribe to unified execution session snapshots. */
+export function subscribeExecution(
+  runId: string,
+  onSnapshot: (session: ExecutionSession) => void,
+  onDone?: () => void,
+): EventSource {
+  const es = new EventSource(`${BASE}/runs/${runId}/execution/stream`);
+  es.addEventListener("snapshot", (e: MessageEvent) => {
+    try {
+      onSnapshot(JSON.parse(e.data));
+    } catch {
+      /* skip */
+    }
+  });
   es.onerror = () => {
     es.close();
     onDone?.();

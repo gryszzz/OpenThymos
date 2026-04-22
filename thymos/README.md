@@ -2,115 +2,105 @@
 
 <img src="Thymos-logo.PNG" alt="Thymos" width="128" height="128" />
 
-# Thymos — Rust Framework
+# Thymos Rust Workspace
 
-**The runtime for governed cognition.**
-
-*Cognition proposes. Runtime decides. Ledger remembers.*
+**The execution kernel behind the Thymos product surfaces.**
 
 </div>
 
 ---
 
-Thymos treats a language model as a bounded **proposer** against a ledgered, policy-governed runtime. The model emits typed **Intents**. The runtime compiles them into **Proposals**, evaluates policy under a signed **Capability Writ**, stages effects through typed **Tool Contracts**, and appends signed, content-addressed **Commits** to an append-only **Trajectory Ledger**.
+This directory contains the Rust implementation of the Thymos runtime, server, CLI, worker boundary, and core execution model.
 
-This directory is the **Phase 1 reference implementation** in Rust — 11 crates, 93 passing tests.
+If the top-level README explains **what Thymos is**, this README explains **where the runtime lives**.
 
-## Quickstart
+## What Lives Here
+
+- `thymos-runtime` — the agent loop and execution orchestration
+- `thymos-server` — the shared HTTP runtime used by the web app, CLI, and editor integrations
+- `thymos-cli` — terminal client and interactive shell
+- `thymos-worker` — worker boundary for higher-risk shell/http execution
+- `thymos-cognition` — model adapters
+- `thymos-tools` — typed tools for code, shell, HTTP, memory, and delegation
+- `thymos-ledger` — durable execution history
+- `thymos-policy` — capability and approval enforcement
+
+## What Thymos Does In Practice
+
+The runtime takes a natural-language task and drives an execution loop:
+
+`Intent -> Proposal -> Execution -> Result`
+
+That loop is shared across:
+
+- the web operator console
+- the CLI and shell
+- the VS Code sidebar
+- any other client that attaches to the server
+
+Every surface can observe the same run because the server exposes a unified execution session and live streaming state.
+
+## Quick Start
+
+### Start the runtime server
 
 ```bash
-cargo run --example hello_triad -p thymos-runtime
-```
-
-Signs a Writ, submits four Intents (one rejected by policy), prints the full trajectory + world projection. No API key required.
-
-```bash
-# HTTP server (mock cognition, no key)
 cargo run -p thymos-server
-curl http://localhost:3001/health
-
-# With a real model
-ANTHROPIC_API_KEY=sk-ant-... cargo run -p thymos-server
-OPENAI_API_KEY=sk-...       cargo run -p thymos-server
-
-# CLI
-cargo run -p thymos-cli -- run "Set greeting to hello" --provider mock
-
-# Docker
-docker compose up --build
 ```
+
+### Run a task from the CLI
 
 ```bash
-# Hardened worker-backed tool fabric
-cargo build --release -p thymos-worker
-THYMOS_TOOL_FABRIC=worker \
-THYMOS_WORKER_BIN=$PWD/target/release/thymos-worker \
-cargo run -p thymos-server
+cargo run -p thymos-cli -- run "Inspect the repo and summarize the runtime" --provider mock --follow
 ```
 
-See [`docs/getting-started.md`](docs/getting-started.md) for a full tour.
+### Follow a run later
 
-## Editor integrations
-
-Run Thymos from inside VSCode two ways:
-
-1. **Tasks** — `.vscode/tasks.json` ships with `Thymos: Start Server`,
-   `Thymos: Shell (interactive)`, `Thymos: Auto Run`, `Thymos: Health`,
-   `Thymos: Runs (last 20)`, and `Thymos: Test`. Open the Command Palette →
-   *Tasks: Run Task*. Zero extension install.
-2. **Extension** — [`clients/vscode`](clients/vscode/README.md) — status-bar
-   health indicator, one-click shell launcher, and **native diff review** for
-   every pending `fs_patch` approval. Build with `npm install && npm run
-   compile`, then F5 or `npx vsce package`.
-
-## Architecture
-
-```
-Cognition (LLM, or anything implementing the Cognition trait)
-      │  Intent
-      ▼
-Compiler ── resolve writ, typecheck, policy eval, budget check ───▶ Proposal
-      │
-      ▼
-Runtime ── stage, invoke tool contract, verify postconditions ────▶ Commit
-      │
-      ▼
-Ledger (SQLite, append-only, content-addressed via BLAKE3, parent-chained)
+```bash
+cargo run -p thymos-cli -- status <run-id>
+cargo run -p thymos-cli -- stream <run-id>
+cargo run -p thymos-cli -- runs show <run-id>
 ```
 
-See [`docs/architecture.md`](docs/architecture.md).
+## Current Runtime Shape
 
-## Crates
+Today the runtime supports:
 
-| Crate              | Role                                                                 |
-| ------------------ | -------------------------------------------------------------------- |
-| `thymos-core`      | Types, hashing (BLAKE3), signing (Ed25519), invariants               |
-| `thymos-ledger`    | Append-only content-addressed store (SQLite; Postgres stub)          |
-| `thymos-policy`    | Policy trait + stock policies                                        |
-| `thymos-tools`     | `ToolContract` trait + stock tools (kv, memory, shell, http, delegate, MCP, manifest) |
-| `thymos-worker`    | Subprocess worker boundary for the secure tool fabric                |
-| `thymos-compiler`  | Intent → Proposal compiler                                           |
-| `thymos-cognition` | LLM adapters (Anthropic, OpenAI, local OpenAI-compat, mock)          |
-| `thymos-runtime`   | Agent loop, world projection, async streaming, approval channel     |
-| `thymos-server`    | axum HTTP facade, SSE, JWT + gateway auth, run store                |
-| `thymos-marketplace` | In-memory tool-package registry                                    |
-| `thymos-cli`       | Command-line client                                                  |
-| `thymos-client`    | Typed async Rust SDK                                                 |
+- autonomous step-by-step execution
+- retries on transient cognition failures
+- structured runtime recovery after tool execution failures
+- approval suspension and resume flows
+- cancellation and resume
+- shared execution sessions for operator-facing clients
+- world replay and branching
+- local and hosted cognition providers
 
-## Status
+## Surfaces Powered By This Workspace
 
-Pre-alpha. The IPC Triad, signed Writs, ledger, policy, tool contracts, sync + async agent loops, HTTP server with SSE streaming, JWT + API-gateway auth, tenant isolation, and persistent production-mode server config are implemented and tested. See the top-level [README](../README.md#status) for the full checklist.
+- `POST /runs` starts a shared backend run
+- `/runs/:id/execution` exposes the current execution session
+- `/runs/:id/execution/stream` streams live execution state
+- `/runs/:id/stream` streams raw cognition events
+- `/runs/:id/world` exposes current projected world state
 
-Slice 2 is underway: `shell` and `http` now route through a secure tool-fabric seam, the shell emits THYMOS-native receipts, and a worker-backed hardened mode is available through `thymos-worker`. A lightweight GitHub Pages site now lives under `docs/pages` and deploys via `.github/workflows/pages.yml`.
+## Recommended Development Flow
 
-## Tests
+### Backend only
 
 ```bash
 cargo test --workspace
 ```
 
-93 tests currently pass, including a 12-test cognition migration regression harness (Opus 4.6 → 4.7), a 12-test JWT auth E2E suite, and a 22-test server E2E suite with tenant-isolation checks.
+### Full product loop
 
-## License
+1. Run `cargo run -p thymos-server`
+2. Run the Next.js app from the repo root with `npm run dev`
+3. Open `/runs` in the browser or use the CLI
+4. If working on the VS Code client, compile `clients/vscode`
 
-Apache-2.0.
+## More Docs
+
+- [Top-level README](../README.md)
+- [Getting Started](../docs/getting-started.md)
+- [Architecture](../docs/architecture.md)
+- [API Reference](../docs/api-reference.md)

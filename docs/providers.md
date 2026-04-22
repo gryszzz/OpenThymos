@@ -2,13 +2,14 @@
 layout: default
 title: Cognition Providers
 eyebrow: Bring your own model
-subtitle: One trait, six adapters. Frontier, hosted, local, free.
+subtitle: Swap the proposer, keep the same runtime, tools, and execution model.
 permalink: /providers/
 ---
 
-Thymos cognition is a single trait — `Cognition::step` — with six built-in
-adapters. The runtime is identical regardless of who proposes the next intent;
-only the cost, latency, and tool-following quality change.
+Thymos cognition is a single trait — `Cognition::step` — with multiple built-in
+adapters. The important part is that the runtime does not change when you swap
+providers. The same execution session, tool model, approvals, and operator
+surfaces stay intact; only the proposer changes.
 
 ## Selector
 

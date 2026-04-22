@@ -1,4 +1,5 @@
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
+const githubUrl = "https://github.com/gryszzz/OpenThymos";
 
 export const siteConfig = {
   name: process.env.NEXT_PUBLIC_APP_NAME || "OpenThymos",
@@ -8,7 +9,9 @@ export const siteConfig = {
     "A model-agnostic runtime where typed intents, signed writs, policy gates, and a replayable trajectory ledger keep machine action bounded and auditable.",
   basePath,
   supportEmail: "team@thymos.ai",
-  githubUrl: "https://github.com/gryszzz/THYMOS",
-  docsUrl: "/docs",
+  githubUrl,
+  docsUrl: `${githubUrl}/tree/main/docs`,
+  readmeUrl: `${githubUrl}#readme`,
+  wikiUrl: `${githubUrl}/wiki`,
   org: "Exponet Labs",
 };

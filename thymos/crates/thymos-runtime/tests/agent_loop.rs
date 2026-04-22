@@ -82,6 +82,7 @@ fn run_agent_executes_scripted_intents_and_terminates() {
         "exercise the triad",
         &writ,
         AgentRunOptions { max_steps: 8 },
+        None,
     )
     .expect("agent run");
 
@@ -108,6 +109,7 @@ fn run_agent_records_rejection_and_keeps_going() {
         "adapt to rejection",
         &writ,
         AgentRunOptions { max_steps: 8 },
+        None,
     )
     .expect("agent run");
 
@@ -139,6 +141,7 @@ fn run_agent_stops_at_max_steps() {
         "step-bounded run",
         &writ,
         AgentRunOptions { max_steps: 2 },
+        None,
     )
     .expect("agent run");
 
@@ -204,6 +207,7 @@ fn run_agent_rejects_on_budget_exhaustion() {
         "budget-bounded run",
         &tight_writ,
         AgentRunOptions { max_steps: 8 },
+        None,
     )
     .expect("agent run");
 

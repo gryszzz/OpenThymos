@@ -420,6 +420,9 @@ fn build_tool_results(
             HistoryItem::Rejected { intent, reason } => {
                 outcomes.insert(intent.id, HistoryOutcome::Rejected(reason.clone()));
             }
+            HistoryItem::Failed { intent, error } => {
+                outcomes.insert(intent.id, HistoryOutcome::Failed(error.clone()));
+            }
         }
     }
 
@@ -441,6 +444,9 @@ fn build_tool_results(
             Some(HistoryOutcome::Rejected(reason)) => {
                 format!("Rejected by runtime. Reason: {reason:?}")
             }
+            Some(HistoryOutcome::Failed(error)) => {
+                format!("Execution failed after staging. Error: {error}")
+            }
             None => "Proposal was not executed this turn (runtime deferred or suspended).".into(),
         };
 
@@ -458,6 +464,7 @@ fn build_tool_results(
 enum HistoryOutcome {
     Committed(serde_json::Value),
     Rejected(RejectionReason),
+    Failed(String),
 }
 
 // ---------- JSON-block tool protocol (local-model fallback) ------------------
@@ -552,6 +559,9 @@ fn build_tool_results_jsonblock(
             HistoryItem::Rejected { intent, reason } => {
                 outcomes.insert(intent.id, HistoryOutcome::Rejected(reason.clone()));
             }
+            HistoryItem::Failed { intent, error } => {
+                outcomes.insert(intent.id, HistoryOutcome::Failed(error.clone()));
+            }
         }
     }
 
@@ -571,6 +581,9 @@ fn build_tool_results_jsonblock(
             }
             Some(HistoryOutcome::Rejected(reason)) => {
                 format!("  [{n}] REJECTED → {reason:?}", n = idx + 1)
+            }
+            Some(HistoryOutcome::Failed(error)) => {
+                format!("  [{n}] EXECUTION FAILED → {error}", n = idx + 1)
             }
             None => format!("  [{n}] not executed", n = idx + 1),
         };

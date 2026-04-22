@@ -36,9 +36,9 @@ ARG CREATED=1970-01-01T00:00:00Z
 
 LABEL org.opencontainers.image.title="Thymos" \
       org.opencontainers.image.description="Governed-cognition runtime for LLM agents. Separates cognition from execution via a typed Intent → Proposal → Ledger pipeline." \
-      org.opencontainers.image.url="https://github.com/gryszzz/THYMOS" \
-      org.opencontainers.image.source="https://github.com/gryszzz/THYMOS" \
-      org.opencontainers.image.documentation="https://github.com/gryszzz/THYMOS#readme" \
+      org.opencontainers.image.url="https://github.com/gryszzz/OpenThymos" \
+      org.opencontainers.image.source="https://github.com/gryszzz/OpenThymos" \
+      org.opencontainers.image.documentation="https://github.com/gryszzz/OpenThymos#readme" \
       org.opencontainers.image.vendor="grysz" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.base.name="docker.io/library/debian:trixie-slim" \

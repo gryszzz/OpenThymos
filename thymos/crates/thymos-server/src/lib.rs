@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 pub mod audit;
 pub mod auth;
+pub mod execution;
 pub mod marketplace_api;
 pub mod middleware;
 pub mod run_store;
@@ -35,6 +36,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::{broadcast, oneshot, watch};
 use tower_http::cors::CorsLayer;
 
+use execution::ExecutionSession;
 use thymos_cognition::{build_cognition, CognitionConfig, CognitionEvent, NonStreamingAdapter};
 use thymos_core::{
     crypto::{generate_signing_key, public_key_of},
@@ -44,7 +46,7 @@ use thymos_core::{
 use thymos_ledger::{EntryPayload, Ledger};
 use thymos_policy::{PolicyEngine, WritAuthorityPolicy};
 use thymos_runtime::agent_async::ApprovalDecision;
-use thymos_runtime::{AgentRunOptions, AgentRunSummary, Runtime};
+use thymos_runtime::{AgentEventCallback, AgentRunOptions, AgentRunSummary, AgentTraceEvent, Runtime, Termination};
 use thymos_tools::{
     DelegateTool, FsPatchTool, FsReadTool, GrepTool, HttpTool, KvGetTool, KvSetTool, ListFilesTool,
     MemoryRecallTool, MemoryStoreTool, RepoMapTool, ShellTool, TestRunTool, ToolRegistry,
@@ -156,6 +158,7 @@ pub struct RunSummaryDto {
     pub intents_submitted: u32,
     pub commits: u32,
     pub rejections: u32,
+    pub failures: u32,
     pub final_answer: Option<String>,
     pub terminated_by: String,
 }
@@ -167,6 +170,7 @@ impl From<&AgentRunSummary> for RunSummaryDto {
             intents_submitted: s.intents_submitted,
             commits: s.commits,
             rejections: s.rejections,
+            failures: s.failures,
             final_answer: s.final_answer.clone(),
             terminated_by: format!("{:?}", s.terminated_by),
         }
@@ -206,6 +210,10 @@ pub struct AppState {
     pub event_channels: Mutex<HashMap<String, broadcast::Sender<EntryDto>>>,
     /// Cognition streaming events per run (tokens, tool-use deltas).
     pub cognition_channels: Mutex<HashMap<String, broadcast::Sender<CognitionEvent>>>,
+    /// Unified execution session snapshots per run.
+    pub execution_sessions: Mutex<HashMap<String, ExecutionSession>>,
+    /// Broadcast channel of full execution session snapshots per run.
+    pub execution_channels: Mutex<HashMap<String, broadcast::Sender<ExecutionSession>>>,
     /// Optional API gateway for auth + rate limiting.
     pub gateway: Option<Arc<middleware::ApiGateway>>,
     /// Optional JWT configuration for token-based auth.
@@ -300,6 +308,8 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/runs", get(list_runs).post(create_run))
         .route("/runs/{id}", get(get_run))
+        .route("/runs/{id}/execution", get(get_execution))
+        .route("/runs/{id}/execution/stream", get(get_execution_stream))
         .route("/runs/{id}/events", get(get_events))
         .route("/runs/{id}/stream", get(get_stream))
         .route("/runs/{id}/world", get(get_world))
@@ -360,6 +370,58 @@ fn extract_tenant_id(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string()
+}
+
+fn run_status_from_summary(summary: &AgentRunSummary) -> RunStatus {
+    if matches!(summary.terminated_by, Termination::CognitionDone) {
+        RunStatus::Completed
+    } else {
+        RunStatus::Failed
+    }
+}
+
+fn status_str(status: &RunStatus) -> &'static str {
+    match status {
+        RunStatus::Running => "running",
+        RunStatus::Completed => "completed",
+        RunStatus::Failed => "failed",
+    }
+}
+
+fn ensure_execution_channel(state: &Arc<AppState>, run_id: &str) -> broadcast::Sender<ExecutionSession> {
+    let mut channels = state.execution_channels.lock().unwrap();
+    channels
+        .entry(run_id.to_string())
+        .or_insert_with(|| {
+            let (tx, _) = broadcast::channel(256);
+            tx
+        })
+        .clone()
+}
+
+fn publish_execution_session(state: &Arc<AppState>, run_id: &str, session: ExecutionSession) {
+    {
+        let mut sessions = state.execution_sessions.lock().unwrap();
+        sessions.insert(run_id.to_string(), session.clone());
+    }
+    let tx = ensure_execution_channel(state, run_id);
+    let _ = tx.send(session);
+}
+
+fn with_execution_session<F>(state: &Arc<AppState>, run_id: &str, task: &str, max_steps: u32, mut f: F)
+where
+    F: FnMut(&mut ExecutionSession),
+{
+    let session = {
+        let mut sessions = state.execution_sessions.lock().unwrap();
+        let session = sessions
+            .entry(run_id.to_string())
+            .or_insert_with(|| ExecutionSession::new(run_id, task, max_steps));
+        f(session);
+        session.clone()
+    };
+    let tx = ensure_execution_channel(state, run_id);
+    let _ = tx.send(session);
 }
 
 /// Check if a caller has access to a run. Empty tenant = no restriction.
@@ -482,6 +544,7 @@ async fn resume_run(
     // Create fresh channels.
     let (entry_tx, _) = broadcast::channel(256);
     let (cognition_tx, _) = broadcast::channel::<CognitionEvent>(256);
+    let (execution_tx, _) = broadcast::channel::<ExecutionSession>(256);
     {
         let mut channels = state.event_channels.lock().unwrap();
         channels.insert(id.clone(), entry_tx.clone());
@@ -490,6 +553,11 @@ async fn resume_run(
         let mut channels = state.cognition_channels.lock().unwrap();
         channels.insert(id.clone(), cognition_tx.clone());
     }
+    {
+        let mut channels = state.execution_channels.lock().unwrap();
+        channels.insert(id.clone(), execution_tx);
+    }
+    publish_execution_session(&state, &id, ExecutionSession::new(&id, &req.task, req.max_steps));
 
     let runtime = state.runtime.clone();
     let state2 = state.clone();
@@ -523,10 +591,14 @@ async fn resume_run(
                         intents_submitted: 0,
                         commits: 0,
                         rejections: 0,
+                        failures: 1,
                         final_answer: Some(format!("resume failed: {e}")),
                         terminated_by: "Error".into(),
                     });
                 }
+                with_execution_session(&state2, &run_id, &task, req.max_steps, |session| {
+                    session.mark_failed(format!("resume failed: {e}"));
+                });
                 return;
             }
         };
@@ -548,6 +620,15 @@ async fn resume_run(
                 pending.insert((run_id_for_approvals.clone(), channel), tx);
                 rx
             });
+        let trace_state = state2.clone();
+        let trace_run_id = run_id.clone();
+        let trace_task = task.clone();
+        let trace_max_steps = req.max_steps;
+        let trace_tx: AgentEventCallback = Arc::new(move |event: AgentTraceEvent| {
+            with_execution_session(&trace_state, &trace_run_id, &trace_task, trace_max_steps, |session| {
+                session.apply_trace(event.clone());
+            });
+        });
 
         let result = thymos_runtime::run_agent_streaming(
             &runtime,
@@ -591,6 +672,7 @@ async fn resume_run(
             },
             cognition_tx,
             Some(approval_requester),
+            Some(trace_tx),
         )
         .await;
 
@@ -602,11 +684,15 @@ async fn resume_run(
                 // Add existing commits to the count.
                 let mut full_dto = dto.clone();
                 full_dto.commits += existing_commits as u32;
+                let status = run_status_from_summary(&summary);
                 if let Some(rec) = runs.get_mut(&run_id) {
                     rec.trajectory_id = traj_id;
-                    rec.status = RunStatus::Completed;
-                    rec.summary = Some(full_dto);
+                    rec.status = status.clone();
+                    rec.summary = Some(full_dto.clone());
                 }
+                with_execution_session(&state2, &run_id, &task, req.max_steps, |session| {
+                    session.apply_summary(&summary);
+                });
             }
             Err(e) => {
                 if let Some(rec) = runs.get_mut(&run_id) {
@@ -616,10 +702,14 @@ async fn resume_run(
                         intents_submitted: 0,
                         commits: 0,
                         rejections: 0,
+                        failures: 1,
                         final_answer: Some(format!("error: {e}")),
                         terminated_by: "Error".into(),
                     });
                 }
+                with_execution_session(&state2, &run_id, &task, req.max_steps, |session| {
+                    session.mark_failed(format!("error: {e}"));
+                });
             }
         }
     });
@@ -763,6 +853,7 @@ async fn create_run(
     // Create event channels.
     let (entry_tx, _) = broadcast::channel(256);
     let (cognition_tx, _) = broadcast::channel::<CognitionEvent>(256);
+    let (execution_tx, _) = broadcast::channel::<ExecutionSession>(256);
     {
         let mut channels = state.event_channels.lock().unwrap();
         channels.insert(run_id.clone(), entry_tx.clone());
@@ -770,6 +861,10 @@ async fn create_run(
     {
         let mut channels = state.cognition_channels.lock().unwrap();
         channels.insert(run_id.clone(), cognition_tx.clone());
+    }
+    {
+        let mut channels = state.execution_channels.lock().unwrap();
+        channels.insert(run_id.clone(), execution_tx);
     }
 
     // Record the run as running.
@@ -790,6 +885,7 @@ async fn create_run(
     if let Some(store) = &state.run_store {
         let _ = store.insert(&run_id, &task, &tenant_id);
     }
+    publish_execution_session(&state, &run_id, ExecutionSession::new(&run_id, &task, req.max_steps));
 
     // Spawn the agent as an async task with streaming cognition.
     // Create cancellation token for this run.
@@ -831,6 +927,15 @@ async fn create_run(
                 pending.insert((run_id_for_approvals.clone(), channel), tx);
                 rx
             });
+        let trace_state = state2.clone();
+        let trace_run_id = run_id2.clone();
+        let trace_task = task2.clone();
+        let trace_max_steps = req.max_steps;
+        let trace_tx: AgentEventCallback = Arc::new(move |event: AgentTraceEvent| {
+            with_execution_session(&trace_state, &trace_run_id, &trace_task, trace_max_steps, |session| {
+                session.apply_trace(event.clone());
+            });
+        });
 
         let agent_fut = thymos_runtime::run_agent_streaming(
             &runtime,
@@ -842,6 +947,7 @@ async fn create_run(
             },
             cognition_tx,
             Some(approval_requester),
+            Some(trace_tx),
         );
 
         // Race the agent against a cancellation signal.
@@ -873,14 +979,18 @@ async fn create_run(
                 }
 
                 let dto = RunSummaryDto::from(&summary);
+                let status = run_status_from_summary(&summary);
                 if let Some(rec) = runs.get_mut(&run_id2) {
                     rec.trajectory_id = traj_id.clone();
-                    rec.status = RunStatus::Completed;
+                    rec.status = status.clone();
                     rec.summary = Some(dto.clone());
                 }
+                with_execution_session(&state2, &run_id2, &task2, req.max_steps, |session| {
+                    session.apply_summary(&summary);
+                });
                 // Persist to SQLite.
                 if let Some(store) = &state2.run_store {
-                    let _ = store.update(&run_id2, &traj_id, "completed", Some(&dto));
+                    let _ = store.update(&run_id2, &traj_id, status_str(&status), Some(&dto));
                 }
             }
             Err(e) => {
@@ -889,6 +999,7 @@ async fn create_run(
                     intents_submitted: 0,
                     commits: 0,
                     rejections: 0,
+                    failures: 1,
                     final_answer: Some(format!("error: {e}")),
                     terminated_by: "Error".into(),
                 };
@@ -896,6 +1007,13 @@ async fn create_run(
                     rec.status = RunStatus::Failed;
                     rec.summary = Some(err_dto.clone());
                 }
+                with_execution_session(&state2, &run_id2, &task2, req.max_steps, |session| {
+                    if e.to_string().contains("run cancelled by user") {
+                        session.mark_cancelled();
+                    } else {
+                        session.mark_failed(format!("error: {e}"));
+                    }
+                });
                 // Persist to SQLite.
                 if let Some(store) = &state2.run_store {
                     let _ = store.update(&run_id2, "", "failed", Some(&err_dto));
@@ -1022,6 +1140,115 @@ async fn get_run(
         Json(serde_json::json!({ "error": "run not found" })),
     )
         .into_response()
+}
+
+/// GET /runs/:id/execution — get the unified execution session snapshot.
+async fn get_execution(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    jwt_claims: Option<axum::Extension<auth::JwtClaims>>,
+    gateway_ctx: Option<axum::Extension<middleware::GatewayContext>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let caller_tenant = extract_tenant_id(&headers, &jwt_claims, &gateway_ctx);
+
+    if let Some(session) = state.execution_sessions.lock().unwrap().get(&id).cloned() {
+        return (StatusCode::OK, Json(serde_json::to_value(session).unwrap())).into_response();
+    }
+
+    {
+        let runs = state.runs.lock().unwrap();
+        if let Some(rec) = runs.get(&id) {
+            if !tenant_can_access(&rec.tenant_id, &caller_tenant) {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": "run not found" })),
+                )
+                    .into_response();
+            }
+            let session = execution::ExecutionSession::from_run_record(&id, rec);
+            return (StatusCode::OK, Json(serde_json::to_value(session).unwrap())).into_response();
+        }
+    }
+
+    if let Some(store) = &state.run_store {
+        if let Ok(Some(rec)) = store.get(&id) {
+            let session = execution::ExecutionSession::from_run_record(&id, &rec);
+            return (StatusCode::OK, Json(serde_json::to_value(session).unwrap())).into_response();
+        }
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "run not found" })),
+    )
+        .into_response()
+}
+
+/// GET /runs/:id/execution/stream — SSE stream of unified execution session snapshots.
+async fn get_execution_stream(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    jwt_claims: Option<axum::Extension<auth::JwtClaims>>,
+    gateway_ctx: Option<axum::Extension<middleware::GatewayContext>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let caller_tenant = extract_tenant_id(&headers, &jwt_claims, &gateway_ctx);
+    {
+        let runs = state.runs.lock().unwrap();
+        if let Some(rec) = runs.get(&id) {
+            if !tenant_can_access(&rec.tenant_id, &caller_tenant) {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": "run not found" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let initial = state
+        .execution_sessions
+        .lock()
+        .unwrap()
+        .get(&id)
+        .cloned()
+        .or_else(|| {
+            let runs = state.runs.lock().unwrap();
+            runs.get(&id)
+                .map(|rec| execution::ExecutionSession::from_run_record(&id, rec))
+        });
+
+    let rx = {
+        let channels = state.execution_channels.lock().unwrap();
+        channels.get(&id).map(|tx| tx.subscribe())
+    };
+
+    match (initial, rx) {
+        (Some(initial_session), Some(mut rx)) => {
+            let stream = async_stream::stream! {
+                let initial_data = serde_json::to_string(&initial_session).unwrap_or_default();
+                yield Ok::<_, std::convert::Infallible>(Event::default().event("snapshot").data(initial_data));
+                while let Ok(session) = rx.recv().await {
+                    let data = serde_json::to_string(&session).unwrap_or_default();
+                    yield Ok::<_, std::convert::Infallible>(Event::default().event("snapshot").data(data));
+                }
+            };
+            Sse::new(stream).into_response()
+        }
+        (Some(initial_session), None) => {
+            let stream = async_stream::stream! {
+                let initial_data = serde_json::to_string(&initial_session).unwrap_or_default();
+                yield Ok::<_, std::convert::Infallible>(Event::default().event("snapshot").data(initial_data));
+            };
+            Sse::new(stream).into_response()
+        }
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "run not found" })),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /runs/:id/events — SSE stream of trajectory entries (ledger events).
@@ -1333,6 +1560,13 @@ async fn cancel_run(
     match token {
         Some(tx) => {
             let _ = tx.send(true);
+            let task = {
+                let runs = state.runs.lock().unwrap();
+                runs.get(&id).map(|rec| rec.task.clone()).unwrap_or_else(|| "cancelled run".into())
+            };
+            with_execution_session(&state, &id, &task, 1, |session| {
+                session.mark_cancelled();
+            });
             (
                 StatusCode::OK,
                 Json(serde_json::json!({ "run_id": id, "status": "cancelling" })),

@@ -14,6 +14,8 @@ fn test_state() -> Arc<AppState> {
         runs: Mutex::new(HashMap::new()),
         event_channels: Mutex::new(HashMap::new()),
         cognition_channels: Mutex::new(HashMap::new()),
+        execution_sessions: Mutex::new(HashMap::new()),
+        execution_channels: Mutex::new(HashMap::new()),
         gateway: None,
         jwt_config: None,
         pending_approvals: Mutex::new(HashMap::new()),

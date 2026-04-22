@@ -158,6 +158,8 @@ async fn main() {
         runs: Mutex::new(restored_runs),
         event_channels: Mutex::new(HashMap::new()),
         cognition_channels: Mutex::new(HashMap::new()),
+        execution_sessions: Mutex::new(HashMap::new()),
+        execution_channels: Mutex::new(HashMap::new()),
         gateway,
         jwt_config,
         pending_approvals: Mutex::new(HashMap::new()),

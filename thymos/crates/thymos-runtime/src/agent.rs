@@ -12,6 +12,9 @@
 //! small window of `HistoryItem`s produced in the current step (which is
 //! handed to cognition on the next one).
 
+use std::sync::Arc;
+
+use serde::Serialize;
 use thymos_cognition::{Cognition, CognitionContext, HistoryItem};
 use thymos_core::{
     commit::Observation,
@@ -31,6 +34,7 @@ pub struct AgentRunSummary {
     pub intents_submitted: u32,
     pub commits: u32,
     pub rejections: u32,
+    pub failures: u32,
     pub final_answer: Option<String>,
     pub terminated_by: Termination,
 }
@@ -56,6 +60,105 @@ impl Default for AgentRunOptions {
     }
 }
 
+pub type AgentEventCallback = Arc<dyn Fn(AgentTraceEvent) + Send + Sync>;
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentTraceEvent {
+    RunCreated {
+        trajectory_id: String,
+        task: String,
+        max_steps: u32,
+    },
+    StepStarted {
+        step_index: u32,
+        since_last_count: usize,
+    },
+    IntentDeclared {
+        step_index: u32,
+        intent_id: String,
+        tool: String,
+        rationale: String,
+    },
+    ProposalStaged {
+        step_index: u32,
+        intent_id: String,
+        proposal_id: String,
+        tool: String,
+    },
+    ProposalRejected {
+        step_index: u32,
+        intent_id: String,
+        tool: String,
+        reason: String,
+    },
+    ProposalSuspended {
+        step_index: u32,
+        intent_id: String,
+        proposal_id: String,
+        tool: String,
+        channel: String,
+        reason: String,
+    },
+    ExecutionStarted {
+        step_index: u32,
+        intent_id: String,
+        proposal_id: String,
+        tool: String,
+    },
+    ExecutionObserved {
+        step_index: u32,
+        intent_id: String,
+        proposal_id: String,
+        tool: String,
+        latency_ms: u64,
+        delta_ops: usize,
+    },
+    CommitRecorded {
+        step_index: u32,
+        intent_id: String,
+        proposal_id: String,
+        tool: String,
+        commit_id: String,
+        seq: u64,
+    },
+    ExecutionFailed {
+        step_index: u32,
+        intent_id: String,
+        tool: String,
+        error: String,
+    },
+    ApprovalResolved {
+        step_index: u32,
+        proposal_id: String,
+        tool: String,
+        channel: String,
+        approved: bool,
+    },
+    RetryScheduled {
+        step_index: u32,
+        attempt: u32,
+        delay_ms: u64,
+        message: String,
+    },
+    RunFinished {
+        trajectory_id: String,
+        steps_executed: u32,
+        intents_submitted: u32,
+        commits: u32,
+        rejections: u32,
+        failures: u32,
+        final_answer: Option<String>,
+        terminated_by: String,
+    },
+}
+
+pub(crate) fn emit_event(event_tx: Option<&AgentEventCallback>, event: AgentTraceEvent) {
+    if let Some(tx) = event_tx {
+        tx(event);
+    }
+}
+
 /// Drive a Cognition to completion against the Thymos runtime.
 ///
 /// The loop is explicit: cognition proposes, runtime decides, ledger remembers.
@@ -65,9 +168,18 @@ pub fn run_agent(
     task: &str,
     writ: &Writ,
     opts: AgentRunOptions,
+    event_tx: Option<AgentEventCallback>,
 ) -> Result<AgentRunSummary> {
     let run = runtime.create_run(task, task.as_bytes())?;
     let trajectory_id = run.trajectory_id();
+    emit_event(
+        event_tx.as_ref(),
+        AgentTraceEvent::RunCreated {
+            trajectory_id: trajectory_id.to_string(),
+            task: task.to_string(),
+            max_steps: opts.max_steps,
+        },
+    );
 
     #[cfg(feature = "telemetry")]
     tracing::info!(
@@ -81,6 +193,7 @@ pub fn run_agent(
     let mut intents_submitted = 0u32;
     let mut commits = 0u32;
     let mut rejections = 0u32;
+    let mut failures = 0u32;
     let mut final_answer: Option<String> = None;
     let mut terminated_by = Termination::MaxStepsReached;
 
@@ -89,6 +202,15 @@ pub fn run_agent(
         let _step_span = tracing::info_span!("agent.step", step = step_idx).entered();
 
         let world = run.project_world()?;
+
+        let since_last_count = since_last.len();
+        emit_event(
+            event_tx.as_ref(),
+            AgentTraceEvent::StepStarted {
+                step_index: step_idx,
+                since_last_count,
+            },
+        );
 
         let step = cognition.step(&CognitionContext {
             task,
@@ -109,7 +231,37 @@ pub fn run_agent(
 
         for intent in step.intents {
             intents_submitted += 1;
-            let result = run.submit(intent.clone(), writ)?;
+            emit_event(
+                event_tx.as_ref(),
+                AgentTraceEvent::IntentDeclared {
+                    step_index: step_idx,
+                    intent_id: intent.id.to_string(),
+                    tool: intent.body.target.clone(),
+                    rationale: intent.body.rationale.clone(),
+                },
+            );
+            let result = match run.submit_with_trace(intent.clone(), writ, step_idx, event_tx.as_ref())
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    failures += 1;
+                    let error = err.to_string();
+                    emit_event(
+                        event_tx.as_ref(),
+                        AgentTraceEvent::ExecutionFailed {
+                            step_index: step_idx,
+                            intent_id: intent.id.to_string(),
+                            tool: intent.body.target.clone(),
+                            error: error.clone(),
+                        },
+                    );
+                    since_last.push(HistoryItem::Failed {
+                        intent,
+                        error,
+                    });
+                    continue;
+                }
+            };
 
             match result {
                 Step::Committed(commit_id) => {
@@ -132,6 +284,7 @@ pub fn run_agent(
                         intents_submitted,
                         commits,
                         rejections,
+                        failures,
                         final_answer: Some(format!(
                             "suspended for approval on channel '{}': {}",
                             channel, reason
@@ -179,6 +332,7 @@ pub fn run_agent(
         intents_submitted,
         commits,
         rejections,
+        failures,
         final_answer,
         terminated_by,
     })

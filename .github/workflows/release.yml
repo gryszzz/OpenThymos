@@ -78,7 +78,7 @@ jobs:
             org.opencontainers.image.description=Governed-cognition runtime for LLM agents. Separates cognition from execution via a typed Intent → Proposal → Ledger pipeline.
             org.opencontainers.image.vendor=grysz
             org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.documentation=https://github.com/gryszzz/THYMOS#readme
+            org.opencontainers.image.documentation=https://github.com/gryszzz/OpenThymos#readme
       - uses: docker/build-push-action@v6
         with:
           context: thymos

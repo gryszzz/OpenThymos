@@ -19,7 +19,10 @@ use thymos_core::{
 };
 use thymos_ledger::{Entry, EntryPayload};
 
-use super::agent::{AgentRunOptions, AgentRunSummary, Termination};
+use super::agent::{
+    emit_event, AgentEventCallback, AgentRunOptions, AgentRunSummary, AgentTraceEvent,
+    Termination,
+};
 use crate::{Run, Runtime, Step};
 
 /// Approval decision sent through the approval channel.
@@ -53,15 +56,25 @@ pub async fn run_agent_streaming(
     opts: AgentRunOptions,
     event_tx: broadcast::Sender<CognitionEvent>,
     approval_requester: Option<ApprovalRequester>,
+    trace_tx: Option<AgentEventCallback>,
 ) -> Result<AgentRunSummary> {
     let run = runtime.create_run(task, task.as_bytes())?;
     let trajectory_id = run.trajectory_id();
+    emit_event(
+        trace_tx.as_ref(),
+        AgentTraceEvent::RunCreated {
+            trajectory_id: trajectory_id.to_string(),
+            task: task.to_string(),
+            max_steps: opts.max_steps,
+        },
+    );
 
     let mut since_last: Vec<HistoryItem> = Vec::new();
     let mut steps_executed = 0u32;
     let mut intents_submitted = 0u32;
     let mut commits = 0u32;
     let mut rejections = 0u32;
+    let mut failures = 0u32;
     let mut final_answer: Option<String> = None;
     let mut terminated_by = Termination::MaxStepsReached;
 
@@ -91,6 +104,15 @@ pub async fn run_agent_streaming(
                 let _ = event_tx2.send(evt);
             }
         });
+
+        let since_last_count = since_last.len();
+        emit_event(
+            trace_tx.as_ref(),
+            AgentTraceEvent::StepStarted {
+                step_index: step_idx,
+                since_last_count,
+            },
+        );
 
         let ctx = CognitionContext {
             task,
@@ -123,6 +145,15 @@ pub async fn run_agent_streaming(
                             return Err(e);
                         }
                         let backoff_ms = 1000 * 2u64.pow(attempt - 1); // 1s, 2s, 4s
+                        emit_event(
+                            trace_tx.as_ref(),
+                            AgentTraceEvent::RetryScheduled {
+                                step_index: step_idx,
+                                attempt,
+                                delay_ms: backoff_ms,
+                                message: e.to_string(),
+                            },
+                        );
                         let _ = event_tx.send(CognitionEvent::Error {
                             message: format!(
                                 "transient error (attempt {}/{}), retrying in {}ms: {}",
@@ -151,10 +182,37 @@ pub async fn run_agent_streaming(
 
         for intent in step.intents {
             intents_submitted += 1;
+            emit_event(
+                trace_tx.as_ref(),
+                AgentTraceEvent::IntentDeclared {
+                    step_index: step_idx,
+                    intent_id: intent.id.to_string(),
+                    tool: intent.body.target.clone(),
+                    rationale: intent.body.rationale.clone(),
+                },
+            );
             let result = {
                 let intent_clone = intent.clone();
                 let writ_clone = writ.clone();
-                run.submit(intent_clone, &writ_clone)?
+                run.submit_with_trace(intent_clone, &writ_clone, step_idx, trace_tx.as_ref())
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(err) => {
+                    failures += 1;
+                    let error = err.to_string();
+                    emit_event(
+                        trace_tx.as_ref(),
+                        AgentTraceEvent::ExecutionFailed {
+                            step_index: step_idx,
+                            intent_id: intent.id.to_string(),
+                            tool: intent.body.target.clone(),
+                            error: error.clone(),
+                        },
+                    );
+                    since_last.push(HistoryItem::Failed { intent, error });
+                    continue;
+                }
             };
 
             match result {
@@ -194,11 +252,34 @@ pub async fn run_agent_streaming(
 
                             match rx.await {
                                 Ok(decision) => {
-                                    let step_result = run.resume_with_approval(
+                                    let step_result = run.resume_with_approval_trace(
                                         proposal_id,
                                         decision.approve,
                                         writ,
-                                    )?;
+                                        step_idx,
+                                        trace_tx.as_ref(),
+                                    );
+                                    let step_result = match step_result {
+                                        Ok(step_result) => step_result,
+                                        Err(err) => {
+                                            failures += 1;
+                                            let error = err.to_string();
+                                            emit_event(
+                                                trace_tx.as_ref(),
+                                                AgentTraceEvent::ExecutionFailed {
+                                                    step_index: step_idx,
+                                                    intent_id: intent.id.to_string(),
+                                                    tool: intent.body.target.clone(),
+                                                    error: error.clone(),
+                                                },
+                                            );
+                                            since_last.push(HistoryItem::Failed {
+                                                intent,
+                                                error,
+                                            });
+                                            continue;
+                                        }
+                                    };
                                     match step_result {
                                         Step::Committed(commit_id) => {
                                             commits += 1;
@@ -227,6 +308,7 @@ pub async fn run_agent_streaming(
                                         intents_submitted,
                                         commits,
                                         rejections,
+                                        failures,
                                         final_answer: Some(format!(
                                             "approval channel dropped for '{}': {}",
                                             channel, reason
@@ -245,6 +327,7 @@ pub async fn run_agent_streaming(
                                 intents_submitted,
                                 commits,
                                 rejections,
+                                failures,
                                 final_answer: Some(format!(
                                     "suspended for approval on channel '{}': {}",
                                     channel, reason
@@ -281,6 +364,7 @@ pub async fn run_agent_streaming(
         intents_submitted,
         commits,
         rejections,
+        failures,
         final_answer,
         terminated_by,
     })

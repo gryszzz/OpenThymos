@@ -1,96 +1,101 @@
 ---
 layout: default
 title: Coding Agent
-eyebrow: Primary surface
-subtitle: A coding agent that plans, edits, tests, and retries — under a signed writ, with every action on the ledger.
+eyebrow: Primary product surface
+subtitle: Thymos turns coding work into a controlled execution loop instead of a prompt-and-tool guessing game.
 permalink: /coding-agent/
 ---
 
-Thymos ships with a first-class coding agent surface. Under the hood it is the
-same IPC Triad — cognition proposes, runtime decides, ledger remembers — with
-a focused tool surface optimized for repository work.
+## What the coding agent really is
+
+The Thymos coding agent is the first major surface built on top of the runtime.
+
+It is not just "an LLM with file tools."
+
+It is a coding workflow where the runtime:
+
+- plans a next step
+- chooses an allowed tool
+- executes that tool for real
+- observes the result
+- records the outcome
+- retries or adapts when the step fails
 
 ## The loop
 
 ```
-plan   →  edit   →   test   →   retry-on-fail
-  │        │           │
- repo_map fs_patch   test_run
- fs_read  list_files shell(inspect)
- grep
+plan -> inspect -> edit -> test -> recover -> finish
 ```
 
-Every step produces a commit. Every commit is content-addressed. Every tool
-invocation is scoped by a signed writ. The model never touches the
-filesystem directly — it emits Intents that the runtime evaluates, executes,
-and records.
+Typical tools involved:
 
-## The coding tool surface
+- `repo_map`
+- `list_files`
+- `fs_read`
+- `grep`
+- `fs_patch`
+- `test_run`
+- `shell`
 
-| Tool         | Effect   | Risk    | Does                                                              |
-|--------------|----------|---------|-------------------------------------------------------------------|
-| `fs_read`    | read     | low     | Return file content with sha256. Missing file → `{exists:false}`. |
-| `fs_patch`   | write    | medium  | Exact-match edit. Verifies pre-hash, emits post-hash.             |
-| `list_files` | read     | low     | Glob-filtered walk. Respects `.gitignore` and `.thymosignore`.    |
-| `repo_map`   | read     | low     | Typed summary of repo shape: languages, sizes, hashes, tree.      |
-| `grep`       | read     | low     | Pattern search over the repo. Structured matches back.            |
-| `test_run`   | external | medium  | Runs a test profile (`cargo`, `npm`, `pytest`, ...). Typed result. |
-| `shell`      | external | high    | Capability-profiled secure shell. Inspect / build / mutate.       |
+## Why it feels more agentic
 
-Each tool is a `ToolContract` with an input schema, effect class, risk class,
-preconditions, and postconditions. The runtime rejects any invocation outside
-the writ's scope.
+The important part is not that a model can call tools.
 
-## One command
+The important part is that the runtime keeps working through a task until it reaches a real result.
 
-```bash
-thymos code run "add a retry to the HTTP client" \
-    --provider lmstudio \
-    --model qwen2.5-coder-32b-instruct
-```
+That means:
 
-This boots an in-process runtime, mints a coding writ, and drives the model
-through the loop above. Output streams live. A failed `test_run` feeds back as
-a typed observation — the model gets a structured view of the failure and
-proposes a fix on the next turn.
+- failed test runs become observable runtime failures
+- those failures are fed back into the loop
+- the next step can repair the work instead of abandoning it
 
-## Safety by default
+## What the operator sees
 
-- File writes go through `fs_patch`, not raw `shell rm/mv`.
-- `fs_patch` verifies the file's current hash before applying the edit.
-  Concurrent-edit races are caught, not clobbered.
-- The shell tool runs under a capability profile; `inspect` is the default,
-  `mutate` is opt-in, `networked` is its own profile.
-- Any tool can be wired through the worker-backed secure fabric — a
-  subprocess boundary with timeout enforcement and execution receipts.
+From any surface, the operator can see:
 
-## The coding writ
+- which phase the run is in
+- which tool is active
+- what was committed
+- what was rejected
+- what failed
+- whether the runtime is recovering or waiting for approval
 
-The default writ for `thymos code run`:
+That visibility is part of the product, not just debugging output.
 
-```text
-scopes:        fs_read, fs_patch, list_files, repo_map, grep,
-               test_run, shell(inspect)
-budget:        200k tokens · 64 tool calls · 600s wall clock
-effect ceiling: read+write local, no network
-time window:   now → now + 10 min
-delegation:    max_depth 2
-```
+## Safety shape
 
-Override with `thymos writ mint ...` or by passing a signed writ from your
-control plane.
+The coding agent is bounded by:
 
-## Model-agnostic
+- tool scopes
+- budgets
+- effect ceilings
+- time windows
+- approval gates
+- typed tool contracts
 
-Point `--provider lmstudio` (or `ollama`, or any OpenAI-compatible endpoint)
-and the full governance layer applies identically. The `OpenAiCognition`
-adapter accepts a `base_url` and auto-negotiates tool-calling. Swap models
-mid-project without re-plumbing anything.
+The model proposes edits. The runtime decides whether they execute.
 
-## Replayable
+## Shared across every surface
 
-Every run appends to the append-only trajectory ledger. Run
-`thymos runs show <id> --diff` to get a unified diff of what changed.
-Run `thymos runs resume <id>` to pick up from the last commit.
-Every byte is hash-addressable. Every commit has a parent. The ledger is
-the source of truth — nothing lives only in memory.
+The coding agent is the same run whether you look at it through:
+
+- the web operator console
+- `thymos-cli`
+- the interactive shell
+- the VS Code sidebar
+
+Those surfaces differ in presentation, not in runtime truth.
+
+## Good first tasks
+
+- "Map this repo and explain the main runtime crates."
+- "Find the API client and add a small retry helper."
+- "Run the relevant tests and repair any failure."
+- "Summarize the last run and explain why it completed."
+
+## What to read after this
+
+- [Getting Started]({{ '/getting-started' | relative_url }})
+- [Interfaces]({{ '/interfaces' | relative_url }})
+- [Architecture]({{ '/architecture' | relative_url }})
+- [API Reference]({{ '/api-reference' | relative_url }})

@@ -86,6 +86,13 @@ impl<C: Cognition> ContextManager<C> {
                 let reason_size = format!("{:?}", reason).len();
                 (intent_size + reason_size) / 4
             }
+            HistoryItem::Failed { intent, error } => {
+                let intent_size = intent.body.target.len()
+                    + serde_json::to_string(&intent.body.args)
+                        .map(|s| s.len())
+                        .unwrap_or(0);
+                (intent_size + error.len()) / 4
+            }
         }
     }
 
@@ -112,6 +119,9 @@ impl<C: Cognition> ContextManager<C> {
                 HistoryItem::Rejected { .. } => {
                     rejections += 1;
                 }
+                HistoryItem::Failed { .. } => {
+                    rejections += 1;
+                }
             }
         }
 
@@ -135,6 +145,12 @@ impl<C: Cognition> ContextManager<C> {
                     summary.push_str(&format!(
                         "  - {} -> rejected ({:?})\n",
                         intent.body.target, reason
+                    ));
+                }
+                HistoryItem::Failed { intent, error } => {
+                    summary.push_str(&format!(
+                        "  - {} -> execution failed ({})\n",
+                        intent.body.target, error
                     ));
                 }
             }

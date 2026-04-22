@@ -671,6 +671,9 @@ fn build_tool_results(
             HistoryItem::Rejected { intent, reason } => {
                 outcomes.insert(intent.id, HistoryOutcome::Rejected(reason.clone()));
             }
+            HistoryItem::Failed { intent, error } => {
+                outcomes.insert(intent.id, HistoryOutcome::Failed(error.clone()));
+            }
         }
     }
 
@@ -694,6 +697,9 @@ fn build_tool_results(
             Some(HistoryOutcome::Rejected(reason)) => {
                 (format!("Rejected by runtime. Reason: {reason:?}"), true)
             }
+            Some(HistoryOutcome::Failed(error)) => {
+                (format!("Execution failed after staging. Error: {error}"), true)
+            }
             None => (
                 "Proposal was not executed this turn (runtime deferred or suspended).".into(),
                 true,
@@ -716,6 +722,7 @@ fn build_tool_results(
 enum HistoryOutcome {
     Committed(serde_json::Value),
     Rejected(RejectionReason),
+    Failed(String),
 }
 
 #[cfg(test)]

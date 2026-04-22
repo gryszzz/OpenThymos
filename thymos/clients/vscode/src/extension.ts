@@ -13,6 +13,38 @@ type Config = {
   openPanelOnStartup: boolean;
 };
 
+type ExecutionSession = {
+  run_id: string;
+  task: string;
+  trajectory_id?: string;
+  status: "running" | "waiting_approval" | "completed" | "failed" | "cancelled";
+  phase: "system" | "intent" | "proposal" | "execution" | "result";
+  operator_state: string;
+  current_step: number;
+  max_steps: number;
+  active_tool?: string;
+  final_answer?: string;
+  counters: {
+    commits: number;
+    rejections: number;
+    failures: number;
+    approvals_pending: number;
+    intents_declared: number;
+    recoveries: number;
+  };
+  log: Array<{
+    idx: number;
+    phase: string;
+    level: "info" | "success" | "warning" | "error";
+    title: string;
+    detail: string;
+    step_index?: number;
+    tool?: string;
+    seq?: number;
+    commit_id?: string;
+  }>;
+};
+
 function getConfig(): Config {
   const c = vscode.workspace.getConfiguration("thymos");
   return {
@@ -129,6 +161,10 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
     this.postMessage({ type: "final", text });
   }
 
+  updateSession(session: ExecutionSession) {
+    this.postMessage({ type: "snapshot", session });
+  }
+
   reveal() {
     void vscode.commands.executeCommand("workbench.view.extension.thymos");
   }
@@ -158,36 +194,179 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
 <head>
 <meta charset="UTF-8" />
 <style>
+  :root {
+    color-scheme: dark;
+  }
   body {
     font-family: var(--vscode-font-family);
     font-size: 13px;
-    color: var(--vscode-editor-foreground);
-    background: var(--vscode-editor-background);
+    color: #e8eef7;
+    background:
+      radial-gradient(circle at top right, rgba(88, 155, 255, 0.14), transparent 34%),
+      linear-gradient(180deg, #0b1017 0%, #090d13 100%);
     padding: 12px;
   }
-  h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+  #shell {
+    display: grid;
+    gap: 12px;
+  }
+  .panel {
+    border-radius: 14px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.04), transparent 16%),
+      rgba(10, 15, 22, 0.92);
+    box-shadow: 0 18px 44px rgba(0,0,0,0.22);
+  }
   #header {
-    display: flex; justify-content: space-between; align-items: baseline;
-    border-bottom: 1px solid var(--vscode-editorWidget-border);
-    padding-bottom: 8px; margin-bottom: 12px;
+    padding: 14px;
   }
-  #status { font-size: 12px; color: var(--vscode-descriptionForeground); }
-  .row { margin: 4px 0; white-space: pre-wrap; word-break: break-word; }
-  .row.warn { color: var(--vscode-editorWarning-foreground); }
-  .row.error { color: var(--vscode-editorError-foreground); }
-  .card {
-    border: 1px solid var(--vscode-focusBorder);
-    border-radius: 6px;
+  #eyebrow {
+    color: rgba(139, 180, 255, 0.88);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+  }
+  #task {
+    margin-top: 8px;
+    color: rgba(214, 225, 240, 0.82);
+    line-height: 1.55;
+  }
+  #statusline {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+    color: rgba(201, 212, 225, 0.78);
+    font-size: 12px;
+  }
+  #status {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(88, 155, 255, 0.22);
+    background: rgba(88, 155, 255, 0.08);
+    color: #cfe0ff;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  #metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    padding: 0 14px 14px;
+  }
+  .metric {
+    border-radius: 12px;
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    background: rgba(255,255,255,0.03);
+    padding: 10px 12px;
+  }
+  .metric .label {
+    color: rgba(148, 163, 184, 0.82);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  .metric .value {
+    margin-top: 6px;
+    font-size: 15px;
+    font-weight: 700;
+    color: #eef4fb;
+  }
+  #runtime {
+    padding: 14px;
+  }
+  #operator {
+    color: #7cb3ff;
+    font-weight: 600;
+    margin-bottom: 10px;
+  }
+  #log, #approvals {
+    display: grid;
+    gap: 10px;
+  }
+  .log-entry {
+    border-radius: 12px;
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    background: rgba(255,255,255,0.03);
     padding: 12px;
-    margin: 14px 0;
-    background: var(--vscode-editorWidget-background);
+  }
+  .log-top {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .phase {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(88, 155, 255, 0.12);
+    color: #d7e8ff;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .log-title {
+    font-weight: 700;
+    color: #eef4fb;
+  }
+  .log-detail {
+    color: rgba(214, 225, 240, 0.78);
+    white-space: pre-wrap;
+    line-height: 1.55;
+  }
+  .row {
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: rgba(214, 225, 240, 0.82);
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .chip {
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    padding: 3px 8px;
+    color: rgba(201, 212, 225, 0.76);
+    font-size: 10px;
+  }
+  .empty {
+    color: rgba(201, 212, 225, 0.72);
+  }
+  .card {
+    border: 1px solid rgba(245, 158, 11, 0.28);
+    border-radius: 12px;
+    padding: 12px;
+    background: rgba(34, 24, 8, 0.34);
   }
   .card h3 {
-    margin: 0 0 6px; font-size: 13px; font-weight: 600;
-    color: var(--vscode-editorWarning-foreground);
+    margin: 0 0 6px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #ffd08a;
   }
-  .kv { display: grid; grid-template-columns: 80px 1fr; gap: 2px 10px; margin-bottom: 8px; }
-  .kv span:nth-child(odd) { color: var(--vscode-descriptionForeground); }
+  .kv { display: grid; grid-template-columns: 72px 1fr; gap: 2px 10px; margin-bottom: 8px; }
+  .kv span:nth-child(odd) { color: rgba(201, 212, 225, 0.72); }
   .actions { display: flex; gap: 8px; margin-top: 10px; }
   button {
     font-family: inherit; font-size: 12px; padding: 6px 14px;
@@ -212,31 +391,47 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
     font-size: 12px; overflow-x: auto; max-height: 180px;
   }
   .final {
-    margin-top: 14px; padding: 10px;
-    border-left: 3px solid var(--vscode-textLink-foreground);
-    background: var(--vscode-editorWidget-background);
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(52, 211, 153, 0.24);
+    background: rgba(5, 27, 20, 0.42);
   }
   .final h3 { margin: 0 0 6px; font-size: 12px; }
 </style>
 </head>
 <body>
-  <div id="header">
-    <h2>🧠 Thymos</h2>
-    <div id="status">idle</div>
+  <div id="shell">
+    <div id="header" class="panel">
+      <div id="eyebrow">Thymos Runtime</div>
+      <h2>Unified VS Code operator console</h2>
+      <div id="task">Waiting for a run...</div>
+      <div id="statusline">
+        <div id="status">idle</div>
+        <div id="phase">phase: system</div>
+      </div>
+    </div>
+    <div id="metrics" class="panel">
+      <div class="metric"><div class="label">Step</div><div class="value" id="metric-step">0/0</div></div>
+      <div class="metric"><div class="label">Commits</div><div class="value" id="metric-commits">0</div></div>
+      <div class="metric"><div class="label">Recoveries</div><div class="value" id="metric-recoveries">0</div></div>
+    </div>
+    <div id="runtime" class="panel">
+      <div id="operator">Thymos is ready.</div>
+      <div id="log" class="empty">Execution log will appear here.</div>
+    </div>
+    <div id="approvals"></div>
   </div>
-  <div id="log"></div>
   <script>
     const vscode = acquireVsCodeApi();
     const log = document.getElementById("log");
+    const approvals = document.getElementById("approvals");
     const status = document.getElementById("status");
-
-    function appendRow(text, level) {
-      const div = document.createElement("div");
-      div.className = "row" + (level && level !== "info" ? " " + level : "");
-      div.textContent = text;
-      log.appendChild(div);
-      window.scrollTo(0, document.body.scrollHeight);
-    }
+    const phase = document.getElementById("phase");
+    const task = document.getElementById("task");
+    const operator = document.getElementById("operator");
+    const metricStep = document.getElementById("metric-step");
+    const metricCommits = document.getElementById("metric-commits");
+    const metricRecoveries = document.getElementById("metric-recoveries");
 
     function appendCard(card) {
       const div = document.createElement("div");
@@ -283,8 +478,44 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
           }
         });
       });
-      log.appendChild(div);
+      approvals.appendChild(div);
       window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function renderSnapshot(session) {
+      task.textContent = session.task || "Waiting for a run...";
+      status.textContent = session.status.replace(/_/g, " ");
+      phase.textContent = "phase: " + session.phase;
+      operator.textContent = session.operator_state || "Runtime active";
+      metricStep.textContent = String(session.current_step || 0) + "/" + String(session.max_steps || 0);
+      metricCommits.textContent = String(session.counters?.commits ?? 0);
+      metricRecoveries.textContent = String((session.counters?.recoveries ?? 0) + (session.counters?.failures ?? 0));
+
+      if (!Array.isArray(session.log) || session.log.length === 0) {
+        log.className = "empty";
+        log.textContent = "Execution log will appear here.";
+      } else {
+        log.className = "";
+        log.innerHTML = "";
+        for (const entry of session.log) {
+          const div = document.createElement("article");
+          div.className = "log-entry";
+          const chips = [];
+          if (entry.step_index !== undefined) chips.push("step " + (entry.step_index + 1));
+          if (entry.tool) chips.push(entry.tool);
+          if (entry.seq !== undefined) chips.push("seq " + entry.seq);
+          if (entry.commit_id) chips.push("commit " + entry.commit_id.slice(0, 10));
+          div.innerHTML = \`
+            <div class="log-top">
+              <span class="phase">\${escape(entry.phase)}</span>
+              <span class="log-title">\${escape(entry.title)}</span>
+            </div>
+            <div class="log-detail">\${escape(entry.detail)}</div>
+            \${chips.length ? '<div class="chips">' + chips.map((chip) => '<span class="chip">' + escape(chip) + '</span>').join("") + '</div>' : ""}
+          \`;
+          log.appendChild(div);
+        }
+      }
     }
 
     function escape(s) {
@@ -296,12 +527,11 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
 
     window.addEventListener("message", (e) => {
       const msg = e.data;
-      if (msg.type === "log") {
-        appendRow(msg.text, msg.level);
+      if (msg.type === "snapshot") {
+        renderSnapshot(msg.session);
       } else if (msg.type === "run") {
-        appendRow("▶ run " + msg.runId + " — " + msg.task, "info");
-      } else if (msg.type === "status") {
-        status.textContent = msg.status;
+        task.textContent = msg.task;
+        status.textContent = "running";
       } else if (msg.type === "approval") {
         appendCard(msg.card);
       } else if (msg.type === "final") {
@@ -309,7 +539,7 @@ class ThymosSidebar implements vscode.WebviewViewProvider {
         div.className = "final";
         div.innerHTML = '<h3>Final answer</h3><div class="row"></div>';
         div.querySelector(".row").textContent = msg.text;
-        log.appendChild(div);
+        approvals.appendChild(div);
         window.scrollTo(0, document.body.scrollHeight);
       }
     });
@@ -524,20 +754,16 @@ async function pollRun(
   panel: ThymosSidebar,
 ): Promise<void> {
   const handled = new Set<number>();
-  let lastStatus: string | null = null;
 
   while (true) {
-    const status = await httpJson(`${cfg.url}/runs/${runId}`, {
+    const execution = await httpJson(`${cfg.url}/runs/${runId}/execution`, {
       headers: authHeaders(cfg),
     });
-    const st: string = status.body?.status ?? "?";
-    if (st !== lastStatus) {
-      panel.statusChanged(st);
-      panel.log(`status: ${st}`);
-      lastStatus = st;
-    }
+    const session = execution.body as ExecutionSession;
+    panel.updateSession(session);
+    const st: string = session?.status ?? "?";
     if (st === "completed" || st === "failed" || st === "cancelled") {
-      const final = status.body?.summary?.final_answer;
+      const final = session?.final_answer;
       if (final) {
         panel.finalAnswer(final);
       }
@@ -559,7 +785,6 @@ async function pollRun(
           headers: { "Content-Type": "application/json", ...authHeaders(cfg) },
           body: JSON.stringify({ approve: approved }),
         });
-        panel.log(`${approved ? "approved" : "denied"} channel=${channel}`);
       }
       handled.add(entry.seq);
     }

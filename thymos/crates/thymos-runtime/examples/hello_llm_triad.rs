@@ -89,6 +89,7 @@ fn main() -> anyhow::Result<()> {
         task,
         &writ,
         AgentRunOptions { max_steps: 8 },
+        None,
     )?;
 
     // 5. Print the run summary.

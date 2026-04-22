@@ -1,14 +1,13 @@
 title: Thymos
-tagline: The governed runtime for code agents.
+tagline: Unified execution runtime for coding agents.
 description: >-
-  Thymos is the governed execution substrate for code agents. Cognition
-  proposes. Runtime decides. Ledger remembers. Written in Rust. Ships with a
-  secure tool fabric, signed writs, a content-addressed trajectory ledger, and
-  pluggable cognition — Anthropic, OpenAI, or any local OpenAI-compatible
-  backend (LM Studio, Ollama, vLLM, llama.cpp).
+  Thymos is a shared execution runtime for agentic work across CLI, VS Code,
+  terminal, and web surfaces. It executes tasks through Intent, Proposal,
+  Execution, and Result with real tools, signed authority, and a live
+  observable execution session.
 url: "https://gryszzz.github.io"
-baseurl: "/THYMOS"
-repo: "https://github.com/gryszzz/THYMOS"
+baseurl: "/OpenThymos"
+repo: "https://github.com/gryszzz/OpenThymos"
 author: "Exponet Labs"
 
 markdown: kramdown

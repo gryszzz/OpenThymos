@@ -272,6 +272,7 @@ mod tests {
             intents_submitted: 5,
             commits: 4,
             rejections: 1,
+            failures: 0,
             final_answer: Some("done".into()),
             terminated_by: "CognitionDone".into(),
         };

@@ -344,8 +344,8 @@ pub(crate) async fn cmd_status(
 }
 
 pub(crate) async fn cmd_stream(url: &str, run_id: &str) -> Result<(), String> {
-    // Simple SSE client: read chunks from the stream endpoint.
-    let resp = reqwest::get(format!("{url}/runs/{run_id}/stream"))
+    // Unified execution-session stream.
+    let resp = reqwest::get(format!("{url}/runs/{run_id}/execution/stream"))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -358,6 +358,9 @@ pub(crate) async fn cmd_stream(url: &str, run_id: &str) -> Result<(), String> {
     use futures_util::StreamExt;
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
+    let mut last_log_idx = 0u64;
+    let mut last_status = String::new();
+    let mut last_operator_state = String::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| e.to_string())?;
@@ -371,28 +374,38 @@ pub(crate) async fn cmd_stream(url: &str, run_id: &str) -> Result<(), String> {
             for line in event_block.lines() {
                 if let Some(data) = line.strip_prefix("data:") {
                     let data = data.trim();
-                    if let Ok(evt) = serde_json::from_str::<Value>(data) {
-                        match evt["type"].as_str() {
-                            Some("token") => {
-                                print!("{}", evt["text"].as_str().unwrap_or(""));
-                            }
-                            Some("tool_use_start") => {
-                                println!("\n[tool: {}]", evt["tool"].as_str().unwrap_or("?"));
-                            }
-                            Some("tool_use_done") => {
-                                println!("[/tool]");
-                            }
-                            Some("turn_complete") => {
-                                if let Some(answer) = evt["final_answer"].as_str() {
-                                    println!("\n--- Final Answer ---");
-                                    println!("{answer}");
+                    if let Ok(snapshot) = serde_json::from_str::<Value>(data) {
+                        let status = snapshot["status"].as_str().unwrap_or("?");
+                        let phase = snapshot["phase"].as_str().unwrap_or("?");
+                        let operator_state = snapshot["operator_state"].as_str().unwrap_or("");
+
+                        if status != last_status || operator_state != last_operator_state {
+                            println!(
+                                "\n[{} | {}] {}",
+                                status.to_uppercase(),
+                                phase,
+                                operator_state
+                            );
+                            last_status = status.to_string();
+                            last_operator_state = operator_state.to_string();
+                        }
+
+                        if let Some(entries) = snapshot["log"].as_array() {
+                            for entry in entries {
+                                let idx = entry["idx"].as_u64().unwrap_or(0);
+                                if idx <= last_log_idx {
+                                    continue;
                                 }
-                                println!("\n[turn complete: {} intents]", evt["intents_count"]);
+                                print_execution_entry(entry);
+                                last_log_idx = idx;
                             }
-                            Some("error") => {
-                                eprintln!("[error: {}]", evt["message"].as_str().unwrap_or("?"));
+                        }
+
+                        if matches!(status, "completed" | "failed" | "cancelled") {
+                            if let Some(answer) = snapshot["final_answer"].as_str() {
+                                println!("\n--- Final Answer ---");
+                                println!("{answer}");
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -401,6 +414,33 @@ pub(crate) async fn cmd_stream(url: &str, run_id: &str) -> Result<(), String> {
     }
     println!();
     Ok(())
+}
+
+fn print_execution_entry(entry: &Value) {
+    let phase = entry["phase"].as_str().unwrap_or("?");
+    let level = entry["level"].as_str().unwrap_or("info");
+    let title = entry["title"].as_str().unwrap_or("");
+    let detail = entry["detail"].as_str().unwrap_or("");
+    let step = entry["step_index"]
+        .as_u64()
+        .map(|n| format!(" step {}", n + 1))
+        .unwrap_or_default();
+    let tool = entry["tool"]
+        .as_str()
+        .map(|tool| format!(" {tool}"))
+        .unwrap_or_default();
+
+    println!(
+        "[{}:{}{}{}] {}",
+        level.to_uppercase(),
+        phase,
+        step,
+        tool,
+        title
+    );
+    if !detail.is_empty() {
+        println!("  {detail}");
+    }
 }
 
 pub(crate) async fn cmd_world(

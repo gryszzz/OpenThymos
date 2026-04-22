@@ -638,16 +638,32 @@ async fn auto_loop(
     println!("[auto] run {run_id} — polling; {} approvals", state.auto_approve.as_str());
     let mut handled_seqs: HashSet<u64> = HashSet::new();
     let mut last_printed_status: Option<String> = None;
+    let mut last_log_idx = 0u64;
 
     loop {
-        let status = fetch_status(client, url, api_key, run_id).await?;
-        let st = status["status"].as_str().unwrap_or("?").to_string();
+        let execution = fetch_execution(client, url, api_key, run_id).await?;
+        let st = execution["status"].as_str().unwrap_or("?").to_string();
+        let phase = execution["phase"].as_str().unwrap_or("?");
+        let operator = execution["operator_state"].as_str().unwrap_or("");
         if last_printed_status.as_deref() != Some(st.as_str()) {
-            println!("[auto] status: {st}");
+            println!("[auto] status: {st} ({phase})");
             last_printed_status = Some(st.clone());
         }
+        if !operator.is_empty() {
+            println!("[auto] {operator}");
+        }
+        if let Some(entries) = execution["log"].as_array() {
+            for entry in entries {
+                let idx = entry["idx"].as_u64().unwrap_or(0);
+                if idx <= last_log_idx {
+                    continue;
+                }
+                print_execution_entry(entry);
+                last_log_idx = idx;
+            }
+        }
         if matches!(st.as_str(), "completed" | "failed" | "cancelled") {
-            print_final(&status);
+            print_final(&execution);
             return Ok(());
         }
 
@@ -786,13 +802,13 @@ fn render_review(
     out
 }
 
-async fn fetch_status(
+async fn fetch_execution(
     client: &reqwest::Client,
     url: &str,
     api_key: Option<&str>,
     run_id: &str,
 ) -> Result<Value, String> {
-    let mut req = client.get(format!("{url}/runs/{run_id}"));
+    let mut req = client.get(format!("{url}/runs/{run_id}/execution"));
     for (k, v) in auth_headers(api_key) {
         req = req.header(&k, &v);
     }
@@ -818,6 +834,17 @@ async fn fetch_pending_entries(
 }
 
 fn print_final(status: &Value) {
+    if let Some(answer) = status.get("final_answer").and_then(|v| v.as_str()) {
+        println!("--- final answer ---");
+        println!("{answer}");
+    }
+    if let Some(commits) = status
+        .get("counters")
+        .and_then(|v| v.get("commits"))
+        .and_then(|v| v.as_u64())
+    {
+        println!("[auto] commits: {commits}");
+    }
     if let Some(summary) = status.get("summary") {
         if let Some(answer) = summary.get("final_answer").and_then(|v| v.as_str()) {
             println!("--- final answer ---");
@@ -826,6 +853,33 @@ fn print_final(status: &Value) {
         if let Some(commits) = summary.get("commits").and_then(|v| v.as_u64()) {
             println!("[auto] commits: {commits}");
         }
+    }
+}
+
+fn print_execution_entry(entry: &Value) {
+    let phase = entry["phase"].as_str().unwrap_or("?");
+    let level = entry["level"].as_str().unwrap_or("info");
+    let title = entry["title"].as_str().unwrap_or("");
+    let detail = entry["detail"].as_str().unwrap_or("");
+    let step = entry["step_index"]
+        .as_u64()
+        .map(|n| format!(" step {}", n + 1))
+        .unwrap_or_default();
+    let tool = entry["tool"]
+        .as_str()
+        .map(|tool| format!(" {tool}"))
+        .unwrap_or_default();
+
+    println!(
+        "[{}:{}{}{}] {}",
+        level.to_uppercase(),
+        phase,
+        step,
+        tool,
+        title
+    );
+    if !detail.is_empty() {
+        println!("  {detail}");
     }
 }
 

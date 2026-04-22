@@ -2,270 +2,176 @@
 layout: default
 title: API Reference
 eyebrow: HTTP surface
-subtitle: axum over the Thymos runtime. JSON bodies, SSE streams, JWT or API-gateway auth.
+subtitle: The Thymos server exposes run creation, execution-session state, ledger streams, world state, approvals, and control endpoints.
 permalink: /api-reference/
 ---
 
-Base URL: `http://localhost:3001` (default)
+Base URL: `http://localhost:3001`
 
 ## Health
 
 ### GET /health
 
-Liveness probe. Always bypasses auth.
-
-**Response** `200 OK`
-```json
-{ "status": "ok" }
-```
-
----
+Returns server liveness and runtime mode.
 
 ## Runs
 
 ### POST /runs
 
-Start a new agent run.
+Start a new backend run.
 
-**Headers** (optional):
-- `x-thymos-tenant-id` — tenant scoping
-- `x-thymos-user-id` — user scoping
-- `Authorization: Bearer <JWT>` — if JWT auth is enabled
+Example request:
 
-**Request Body**
 ```json
 {
-  "task": "Set greeting to hello and read it back",
-  "max_steps": 32,
-  "tool_scopes": ["*"],
+  "task": "Inspect the repo and explain how the runtime works",
+  "max_steps": 24,
+  "tool_scopes": ["repo_map", "fs_read", "grep", "test_run"],
   "cognition": {
-    "provider": "anthropic",
-    "model": "claude-opus-4-7",
-    "cache_prefix": true
+    "provider": "mock"
   }
 }
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `task` | string | required | Natural language task description |
-| `max_steps` | u32 | 32 | Maximum agent loop iterations |
-| `tool_scopes` | string[] | `["*"]` | Tool glob patterns |
-| `cognition.provider` | string | "anthropic" | `anthropic`, `openai`, `local`, `lmstudio`, `huggingface`, `mock` |
-| `cognition.model` | string | provider default | Full id (`claude-opus-4-7`) or alias (`opus`, `sonnet`, `haiku`, `opus-4.6`) |
-| `cognition.max_tokens` | u32 | provider default | Cap on response tokens |
-| `cognition.thinking_budget_tokens` | u32 | null | Enable extended thinking with this budget (Anthropic 4.7+) |
-| `cognition.cache_prefix` | bool | true | Mark the system+tools prefix with `cache_control` for prompt caching |
-| `cognition.base_url` | string | null | Custom endpoint (for `local` provider) |
+Example response:
 
-**Response** `202 Accepted`
 ```json
 {
   "run_id": "uuid",
-  "task": "Set greeting to hello and read it back",
+  "task": "Inspect the repo and explain how the runtime works",
   "status": "running"
 }
 ```
 
 ### GET /runs/:id
 
-Get run status and summary.
+Returns the persisted run record and summary.
 
-**Response** `200 OK`
-```json
-{
-  "trajectory_id": "hex-string",
-  "task": "...",
-  "status": "completed",
-  "summary": {
-    "steps_executed": 3,
-    "intents_submitted": 3,
-    "commits": 2,
-    "rejections": 0,
-    "final_answer": "Done! The greeting is set to hello.",
-    "terminated_by": "CognitionDone"
-  }
-}
-```
+Example summary fields:
 
-Status values: `running`, `completed`, `failed`
+- `steps_executed`
+- `intents_submitted`
+- `commits`
+- `rejections`
+- `failures`
+- `final_answer`
+- `terminated_by`
 
-### GET /runs/:id/events
+### GET /runs/:id/execution
 
-SSE stream of ledger entries as they are committed.
+Returns the live **execution session** used by the web console, CLI, and VS Code sidebar.
 
-**Event format:**
-```
-data: {"seq":0,"kind":"root","id":"abc123","detail":{...}}
+Example fields:
 
-data: {"seq":1,"kind":"commit","id":"def456","detail":{...}}
-```
+- `status`
+- `phase`
+- `operator_state`
+- `current_step`
+- `max_steps`
+- `active_tool`
+- `final_answer`
+- `counters`
+- `log`
+
+### GET /runs/:id/execution/stream
+
+SSE stream of execution-session snapshots.
+
+This is the best stream to consume if you want operator-facing runtime truth.
 
 ### GET /runs/:id/stream
 
-SSE stream of cognition events (real-time tokens).
+SSE stream of raw cognition events such as tokens and tool-use deltas.
 
-**Event types:**
-- `token` — `{ "text": "..." }`
-- `tool_use_start` — `{ "tool_use_id": "...", "name": "..." }`
-- `tool_use_arg_delta` — `{ "tool_use_id": "...", "delta": "..." }`
-- `tool_use_done` — `{ "tool_use_id": "..." }`
-- `turn_complete` — `{ "stop_reason": "..." }`
-- `error` — `{ "message": "..." }`
+This is useful for model-side visibility, but it is not the authoritative execution state.
+
+### GET /runs/:id/events
+
+SSE stream of ledger entry events.
 
 ### GET /runs/:id/world
 
-Current world state projection from the ledger.
+Returns the current projected world state for the run.
 
-**Response** `200 OK`
-```json
-{
-  "resources": [
-    { "kind": "kv", "id": "greeting", "version": 1, "value": "hello" }
-  ]
-}
-```
+### GET /runs/:id/world/at?seq=N
+
+Returns the projected world state replayed up to a specific sequence number.
 
 ### POST /runs/:id/resume
 
-Resume a previously started or failed run. Body is the same as POST /runs.
+Resume a previously started or failed run.
 
-**Response** `202 Accepted`
-```json
-{ "run_id": "...", "status": "resuming" }
-```
+### POST /runs/:id/cancel
+
+Cancel a currently running run.
+
+### POST /runs/:id/branch
+
+Create a shadow branch from a specific commit.
 
 ### GET /runs/:id/delegations
 
-List child trajectories spawned via delegation.
-
-**Response** `200 OK`
-```json
-{
-  "delegations": [
-    {
-      "child_trajectory_id": "hex",
-      "task": "sub-task description",
-      "final_answer": "result or null",
-      "seq": 3
-    }
-  ]
-}
-```
-
----
+List child trajectories created through delegation.
 
 ## Approvals
 
 ### POST /runs/:id/approvals/:channel
 
-Approve or deny a pending proposal (human-in-the-loop).
+Approve or deny a pending proposal.
 
-**Request Body**
+Example request:
+
 ```json
 { "approve": true }
 ```
-
-**Response** `200 OK`
-```json
-{ "run_id": "...", "channel": "...", "approved": true }
-```
-
-Error responses: `404` (no pending approval), `410` (agent already terminated)
-
----
 
 ## Audit
 
 ### GET /audit/entries
 
-Query ledger entries with optional filters. Supports JSON and CSV export.
+Query ledger entries with optional filters.
 
-**Query Parameters**
-| Param | Type | Description |
-|-------|------|-------------|
-| `run_id` | string | Filter by run (resolves to trajectory) |
-| `kind` | string | Entry kind: root, commit, rejection, pending_approval, delegation, branch |
-| `from` | u64 | Unix timestamp lower bound |
-| `to` | u64 | Unix timestamp upper bound |
-| `format` | string | `json` (default) or `csv` |
-| `limit` | u32 | Max entries (default 1000) |
+Useful filters:
 
-**JSON Response** `200 OK`
-```json
-{
-  "entries": [
-    {
-      "id": "hex",
-      "trajectory_id": "hex",
-      "seq": 0,
-      "kind": "root",
-      "payload": { "type": "root", "note": "..." },
-      "created_at": 1713456789
-    }
-  ],
-  "count": 1
-}
-```
-
-**CSV Response** `200 OK` with `Content-Type: text/csv`
+- `run_id`
+- `kind`
+- `from`
+- `to`
+- `limit`
+- `format=json|csv`
 
 ### GET /audit/entries/count
 
-Count matching entries without fetching payloads. Same query params as above
-(except `format` and `limit`).
-
-**Response** `200 OK`
-```json
-{ "count": 42 }
-```
-
----
+Count matching ledger entries without fetching them.
 
 ## Usage
 
 ### GET /usage
 
-Per-key usage statistics (only meaningful when API gateway is configured).
-
-**Response** `200 OK`
-```json
-{ "message": "API gateway not configured", "stats": [] }
-```
-
----
+Per-key usage stats when the API gateway is configured.
 
 ## Marketplace
 
 ### GET /marketplace/packages
 
-List all published packages (latest versions).
+List published packages.
 
 ### GET /marketplace/packages/:name
 
-Get a specific package by name.
+Get one package.
 
 ### POST /marketplace/packages
 
 Publish a new package.
 
-**Request Body**
-```json
-{
-  "name": "my-tool",
-  "version": "1.0.0",
-  "description": "A useful tool",
-  "author": "you",
-  "kind": "manifest",
-  "tags": ["utility"],
-  "content": "base64-encoded content or JSON"
-}
-```
+## Which endpoint should a new client use?
 
-### DELETE /marketplace/packages/:name/:version
+Use:
 
-Unpublish a specific version.
+- `/runs` to create work
+- `/runs/:id/execution` for current operator state
+- `/runs/:id/execution/stream` for live runtime updates
+- `/runs/:id/world` for current projected world state
+- `/runs/:id/approvals/:channel` for human-in-the-loop actions
 
-### GET /marketplace/search?q=...&tag=...&kind=...&author=...
-
-Search packages by text, tag, kind, or author.
+Use `/runs/:id/stream` only when you specifically want raw cognition streaming.

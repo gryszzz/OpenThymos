@@ -36,6 +36,8 @@ fn test_state_with_jwt(jwt: Option<Arc<auth::JwtConfig>>) -> Arc<AppState> {
         runs: Mutex::new(HashMap::new()),
         event_channels: Mutex::new(HashMap::new()),
         cognition_channels: Mutex::new(HashMap::new()),
+        execution_sessions: Mutex::new(HashMap::new()),
+        execution_channels: Mutex::new(HashMap::new()),
         gateway: None,
         jwt_config: jwt,
         pending_approvals: Mutex::new(HashMap::new()),

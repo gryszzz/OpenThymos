@@ -2,76 +2,131 @@
 layout: default
 title: Architecture
 eyebrow: System design
-subtitle: Thymos treats the language model as a bounded proposer, not the authority. Everything else follows from that.
+subtitle: Thymos is built around a shared runtime, a bounded agent loop, and one observable execution session per run.
 permalink: /architecture/
 ---
 
-## The IPC Triad
+## The big idea
+
+Thymos separates **proposing work** from **executing work**.
+
+The model proposes the next move.
+
+The runtime owns:
+
+- authority
+- tool execution
+- failure handling
+- logging
+- replay
+- completion state
+
+That separation is what lets multiple interfaces attach to the same backend run without inventing their own version of reality.
+
+## The execution flow
 
 ```
-Cognition  ─Intent─▶  Compiler  ─Proposal─▶  Runtime  ─Commit─▶  Ledger
-                        ▲                      │
-                        └──── Policy / Writ ───┘
+Cognition -> Intent -> Proposal -> Execution -> Result
 ```
 
-1. **Intent.** Cognition declares a desired action — a tool target plus
-   arguments plus rationale. No side effects.
-2. **Proposal.** The compiler resolves the writ, typechecks the intent against
-   the tool's schema, evaluates policy, and enforces budget / time-window
-   constraints. Output is a `Staged`, `Rejected`, or `Suspended` proposal.
-3. **Commit.** The runtime executes the tool, verifies post-conditions, and
-   appends a content-addressed commit to the trajectory ledger.
+### Intent
 
-## Planes
+The model declares what it wants to do next.
 
-- **Execution kernel** — `thymos-core`, `thymos-runtime`, `thymos-ledger`.
-  Hashing (BLAKE3), signing (Ed25519), world projection, append-only commits.
-- **Cognition plane** — `thymos-cognition`. Pluggable `Cognition` trait with
-  Anthropic, OpenAI, OpenAI-compatible (local), and mock adapters. Async
-  streaming via `StreamingCognition`.
-- **Tool plane** — `thymos-tools`. Typed `ToolContract`s: `fs_*`, `repo_map`,
-  `grep`, `list_files`, `test_run`, `shell`, `http`, `kv_*`, `memory_*`,
-  `delegate`, `manifest`, `mcp_bridge`.
-- **Secure fabric** — `thymos-worker`. Subprocess boundary for risky tools
-  with capability profiles and execution receipts.
-- **Governance plane** — `thymos-policy` + `thymos-core::writ`. Signed
-  capability writs, policy engine, approval channels.
-- **Distribution plane** — `thymos-server`, `thymos-cli`, `thymos-client`,
-  `thymos-marketplace`. axum HTTP facade, SSE streaming, JWT auth, API
-  gateway, tenant isolation.
+### Proposal
 
-## Crates
+The runtime compiles the intent under the current writ, checks policy, and decides whether the action is allowed, rejected, or suspended for approval.
 
-| Crate                | Role                                                                 |
-| -------------------- | -------------------------------------------------------------------- |
-| `thymos-core`        | Types, hashing, signing, invariants                                  |
-| `thymos-ledger`      | Append-only content-addressed store (SQLite; Postgres stub)          |
-| `thymos-policy`      | Policy trait + stock policies                                        |
-| `thymos-tools`       | `ToolContract` trait + stock coding / shell / http / mcp tools       |
-| `thymos-worker`      | Subprocess worker boundary for the secure tool fabric                |
-| `thymos-compiler`    | Intent → Proposal compiler                                           |
-| `thymos-cognition`   | LLM adapters (Anthropic, OpenAI, local, LM Studio, Hugging Face, mock) |
-| `thymos-runtime`     | Agent loop, world projection, async streaming, approval channel     |
-| `thymos-server`      | axum HTTP facade, SSE, JWT + gateway auth, run store                |
-| `thymos-marketplace` | In-memory tool-package registry                                     |
-| `thymos-cli`         | `thymos code run`, `thymos runs …`, in-process agent driver          |
-| `thymos-client`      | Typed async Rust SDK                                                 |
+### Execution
 
-## Invariants
+If approved, the runtime invokes the real tool and captures the observed outcome.
 
-- **Cognition never mutates state.** It only emits Intents.
-- **Proposals are typed.** A rejected proposal is a first-class outcome fed
-  back to cognition, not an exception.
-- **Commits are hash-addressed.** The ledger chain is the single source of
-  truth; replaying it yields byte-for-byte identical world state.
-- **Writs are signed.** Forged or expired writs fail at the compiler before
-  any tool runs.
-- **Tools declare their deltas.** Postconditions are checked before commit,
-  not after a regretful write.
+### Result
 
-## World projection
+The runtime records what actually happened: commit, rejection, suspension, failure, delegation, or completion.
 
-The world is not stored — it is projected. On any step, the runtime folds
-commits from the ledger into a typed `World` map of resource keys → versioned
-values. Branches recursively fold their ancestor up to the branch point.
-Projection is pure.
+## The agent loop
+
+The loop is intentionally simple:
+
+1. build context
+2. ask cognition for the next step
+3. execute allowed work
+4. observe the outcome
+5. feed the outcome back into the next step
+6. continue until complete, blocked, expired, or cancelled
+
+This is how Thymos behaves like an agent without giving the model direct authority over the world.
+
+## The shared execution session
+
+Each run produces a live execution session with:
+
+- current status
+- current phase
+- operator state
+- counters for commits, rejections, failures, approvals, and recoveries
+- final answer
+- execution log
+
+The web console, CLI, shell, and VS Code sidebar all consume that same runtime session.
+
+## The main planes
+
+### Cognition plane
+
+`thymos-cognition`
+
+Responsible for turning context into proposed next actions. Supports hosted and local providers.
+
+### Runtime plane
+
+`thymos-runtime`
+
+Responsible for running the agent loop, handling approvals, projecting world state, and turning runtime outcomes back into typed history.
+
+### Governance plane
+
+`thymos-policy` and writ handling in `thymos-core`
+
+Responsible for capability enforcement, policy checks, budgets, time windows, and approval boundaries.
+
+### Tool plane
+
+`thymos-tools`
+
+Responsible for typed tools such as file reads, file patches, repo mapping, grep, tests, shell, HTTP, memory, and delegation.
+
+### Ledger plane
+
+`thymos-ledger`
+
+Responsible for durable trajectory history and replayable state.
+
+### Surface plane
+
+`thymos-server`, `thymos-cli`, `clients/vscode`, and the web app
+
+Responsible for exposing the same backend run to different operator surfaces.
+
+## Core invariants
+
+- The model never directly mutates the world.
+- Authority is checked before execution happens.
+- Runtime truth is observable through structured events.
+- Failed execution is part of the run history, not hidden control flow.
+- Clients read shared run state instead of maintaining separate agent state.
+- The ledger remains the durable record of what happened.
+
+## Why this matters
+
+Without a shared runtime, every surface becomes its own mini-agent product.
+
+With Thymos:
+
+- a task started in the CLI can be reviewed in the browser
+- an approval can be handled in VS Code
+- the same run can be resumed later
+- the system can expose one authoritative execution log
+
+That is the architectural point of the product.

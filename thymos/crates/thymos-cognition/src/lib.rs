@@ -58,6 +58,12 @@ pub enum HistoryItem {
         intent: Intent,
         reason: RejectionReason,
     },
+    /// A previously-emitted Intent made it past proposal time but failed
+    /// during execution or commit. Cognition should recover and try again.
+    Failed {
+        intent: Intent,
+        error: String,
+    },
 }
 
 /// One turn of cognition output.

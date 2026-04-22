@@ -21,7 +21,10 @@ use thymos_policy::PolicyEngine;
 use thymos_tools::{ToolInvocation, ToolRegistry};
 
 pub mod agent;
-pub use agent::{run_agent, AgentRunOptions, AgentRunSummary, Termination};
+pub use agent::{
+    run_agent, AgentEventCallback, AgentRunOptions, AgentRunSummary, AgentTraceEvent,
+    Termination,
+};
 
 #[cfg(feature = "async")]
 pub mod agent_async;
@@ -249,6 +252,18 @@ impl<'a> Run<'a> {
 
     /// Submit one Intent. Runs it through the full Triad.
     pub fn submit(&self, intent: Intent, writ: &thymos_core::writ::Writ) -> Result<Step> {
+        self.submit_with_trace(intent, writ, 0, None)
+    }
+
+    /// Submit one intent while emitting structured trace events for operator
+    /// surfaces that need live Intent → Proposal → Execution → Result state.
+    pub fn submit_with_trace(
+        &self,
+        intent: Intent,
+        writ: &thymos_core::writ::Writ,
+        step_index: u32,
+        trace: Option<&crate::AgentEventCallback>,
+    ) -> Result<Step> {
         #[cfg(feature = "telemetry")]
         let _span = tracing::info_span!(
             "triad.submit",
@@ -291,6 +306,15 @@ impl<'a> Run<'a> {
                     intent.id,
                     reason.clone(),
                 )?;
+                crate::agent::emit_event(
+                    trace,
+                    crate::AgentTraceEvent::ProposalRejected {
+                        step_index,
+                        intent_id: intent.id.to_string(),
+                        tool: intent.body.target.clone(),
+                        reason: format!("{reason:?}"),
+                    },
+                );
                 Ok(Step::Rejected(reason))
             }
             Compiled::Suspended {
@@ -298,6 +322,8 @@ impl<'a> Run<'a> {
                 channel,
                 reason,
             } => {
+                let proposal_id = proposal.id.to_string();
+                let proposal_tool = proposal.body.plan.tool.clone();
                 // Reify the pending approval in the ledger so it survives restarts.
                 self.runtime.ledger.append_pending_approval(
                     self.trajectory_id,
@@ -305,9 +331,29 @@ impl<'a> Run<'a> {
                     channel.clone(),
                     reason.clone(),
                 )?;
+                crate::agent::emit_event(
+                    trace,
+                    crate::AgentTraceEvent::ProposalSuspended {
+                        step_index,
+                        intent_id: intent.id.to_string(),
+                        proposal_id,
+                        tool: proposal_tool,
+                        channel: channel.clone(),
+                        reason: reason.clone(),
+                    },
+                );
                 Ok(Step::Suspended { channel, reason })
             }
             Compiled::Staged(proposal) => {
+                crate::agent::emit_event(
+                    trace,
+                    crate::AgentTraceEvent::ProposalStaged {
+                        step_index,
+                        intent_id: intent.id.to_string(),
+                        proposal_id: proposal.id.to_string(),
+                        tool: proposal.body.plan.tool.clone(),
+                    },
+                );
                 // Intercept delegation: spawn a child trajectory instead of
                 // executing a tool.
                 if proposal.body.plan.tool == "delegate" {
@@ -331,6 +377,16 @@ impl<'a> Run<'a> {
                 )
                 .entered();
 
+                crate::agent::emit_event(
+                    trace,
+                    crate::AgentTraceEvent::ExecutionStarted {
+                        step_index,
+                        intent_id: intent.id.to_string(),
+                        proposal_id: proposal.id.to_string(),
+                        tool: proposal.body.plan.tool.clone(),
+                    },
+                );
+
                 let outcome = tool
                     .execute(&inv)
                     .map_err(|e| Error::ToolExecution(e.to_string()))?;
@@ -347,6 +403,18 @@ impl<'a> Run<'a> {
                     );
                     drop(_exec_span);
                 }
+
+                crate::agent::emit_event(
+                    trace,
+                    crate::AgentTraceEvent::ExecutionObserved {
+                        step_index,
+                        intent_id: intent.id.to_string(),
+                        proposal_id: proposal.id.to_string(),
+                        tool: proposal.body.plan.tool.clone(),
+                        latency_ms: outcome.observation.latency_ms,
+                        delta_ops: outcome.delta.0.len(),
+                    },
+                );
 
                 // Look up parent head for the commit.
                 let (parent_hash, parent_seq) = self.runtime.ledger.head(self.trajectory_id)?;
@@ -381,6 +449,18 @@ impl<'a> Run<'a> {
                 let committed_id = CommitId(commit.id.0);
 
                 self.runtime.ledger.append_commit(commit)?;
+
+                crate::agent::emit_event(
+                    trace,
+                    crate::AgentTraceEvent::CommitRecorded {
+                        step_index,
+                        intent_id: intent.id.to_string(),
+                        proposal_id: proposal.id.to_string(),
+                        tool: proposal.body.plan.tool.clone(),
+                        commit_id: committed_id.to_string(),
+                        seq: parent_seq + 1,
+                    },
+                );
 
                 #[cfg(feature = "telemetry")]
                 tracing::info!(commit_id = %committed_id, "committed");
@@ -507,22 +587,47 @@ impl<'a> Run<'a> {
         approve: bool,
         writ: &thymos_core::writ::Writ,
     ) -> Result<Step> {
+        self.resume_with_approval_trace(proposal_id, approve, writ, 0, None)
+    }
+
+    pub fn resume_with_approval_trace(
+        &self,
+        proposal_id: thymos_core::ProposalId,
+        approve: bool,
+        writ: &thymos_core::writ::Writ,
+        step_index: u32,
+        trace: Option<&crate::AgentEventCallback>,
+    ) -> Result<Step> {
         // Find the PendingApproval entry for this proposal.
         let entries = self.runtime.ledger.entries(self.trajectory_id)?;
         let pending = entries.iter().find_map(|e| {
-            if let EntryPayload::PendingApproval { proposal, .. } = &e.payload {
+            if let EntryPayload::PendingApproval {
+                proposal, channel, ..
+            } = &e.payload
+            {
                 if proposal.id == proposal_id {
-                    return Some(proposal.clone());
+                    return Some((proposal.clone(), channel.clone()));
                 }
             }
             None
         });
-        let proposal = pending.ok_or_else(|| {
+        let (proposal, approval_channel) = pending.ok_or_else(|| {
             Error::Other(format!(
                 "no pending approval for proposal {:?}",
                 proposal_id
             ))
         })?;
+
+        crate::agent::emit_event(
+            trace,
+            crate::AgentTraceEvent::ApprovalResolved {
+                step_index,
+                proposal_id: proposal.id.to_string(),
+                tool: proposal.body.plan.tool.clone(),
+                channel: approval_channel,
+                approved: approve,
+            },
+        );
 
         if !approve {
             self.runtime.ledger.append_rejection(
@@ -544,10 +649,30 @@ impl<'a> Run<'a> {
             args: &proposal.body.plan.args,
             world: &world,
         };
+        crate::agent::emit_event(
+            trace,
+            crate::AgentTraceEvent::ExecutionStarted {
+                step_index,
+                intent_id: proposal.body.intent_id.to_string(),
+                proposal_id: proposal.id.to_string(),
+                tool: proposal.body.plan.tool.clone(),
+            },
+        );
         let outcome = tool
             .execute(&inv)
             .map_err(|e| Error::ToolExecution(e.to_string()))?;
         tool.check_postconditions(&inv, &outcome.delta)?;
+        crate::agent::emit_event(
+            trace,
+            crate::AgentTraceEvent::ExecutionObserved {
+                step_index,
+                intent_id: proposal.body.intent_id.to_string(),
+                proposal_id: proposal.id.to_string(),
+                tool: proposal.body.plan.tool.clone(),
+                latency_ms: outcome.observation.latency_ms,
+                delta_ops: outcome.delta.0.len(),
+            },
+        );
 
         let (parent_hash, parent_seq) = self.runtime.ledger.head(self.trajectory_id)?;
 
@@ -573,6 +698,17 @@ impl<'a> Run<'a> {
         let commit = Commit::new(commit_body)?;
         let committed_id = CommitId(commit.id.0);
         self.runtime.ledger.append_commit(commit)?;
+        crate::agent::emit_event(
+            trace,
+            crate::AgentTraceEvent::CommitRecorded {
+                step_index,
+                intent_id: proposal.body.intent_id.to_string(),
+                proposal_id: proposal.id.to_string(),
+                tool: proposal.body.plan.tool.clone(),
+                commit_id: committed_id.to_string(),
+                seq: parent_seq + 1,
+            },
+        );
         Ok(Step::Committed(committed_id))
     }
 

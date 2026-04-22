@@ -152,11 +152,11 @@ export function ThymosLanding() {
 
           <a
             className="thymos-header-cta"
-            href={siteConfig.githubUrl}
+            href={siteConfig.readmeUrl}
             target="_blank"
             rel="noreferrer"
           >
-            GitHub
+            Get Started
           </a>
         </header>
 
@@ -174,16 +174,24 @@ export function ThymosLanding() {
             </p>
 
             <div className="thymos-hero-actions thymos-reveal thymos-delay-5">
+              <a className="thymos-primary-action" href={`${siteConfig.basePath}/runs/`}>
+                Open the runtime
+              </a>
               <a
-                className="thymos-primary-action"
-                href={siteConfig.githubUrl}
+                className="thymos-secondary-action"
+                href={siteConfig.readmeUrl}
                 target="_blank"
                 rel="noreferrer"
               >
-                View the repo
+                Read the README
               </a>
-              <a className="thymos-secondary-action" href="#mechanism">
-                See the execution model
+              <a
+                className="thymos-secondary-action"
+                href={siteConfig.wikiUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open the wiki
               </a>
             </div>
 
@@ -362,6 +370,45 @@ export function ThymosLanding() {
           </div>
         </section>
 
+        <section className="thymos-section" id="onboarding">
+          <div className="thymos-section-head compact">
+            <span className="thymos-kicker">Onboarding paths</span>
+            <h2>Start from the surface that matches how you work.</h2>
+            <p>
+              The CLI, sidebar, terminal, and web console all talk to the same runtime. Pick your
+              entry point, follow one quickstart, and the execution state stays consistent
+              everywhere.
+            </p>
+          </div>
+
+          <div className="thymos-workflow-grid">
+            <article className="thymos-workflow-card">
+              <h3>Browser runtime</h3>
+              <ul>
+                <li>Open the unified run console and submit a task.</li>
+                <li>Watch intent, proposal, execution, and result update live.</li>
+                <li>Review the execution log, world state, and replay controls in one place.</li>
+              </ul>
+            </article>
+            <article className="thymos-workflow-card">
+              <h3>CLI and terminal</h3>
+              <ul>
+                <li>Run `thymos shell` or create runs directly from the CLI.</li>
+                <li>See the same execution session the browser and sidebar show.</li>
+                <li>Use the README quickstart when you want the fastest local setup path.</li>
+              </ul>
+            </article>
+            <article className="thymos-workflow-card">
+              <h3>Docs and wiki</h3>
+              <ul>
+                <li>Use the docs for architecture, interfaces, and API references.</li>
+                <li>Use the wiki source as the operator-facing knowledge base.</li>
+                <li>Keep onboarding and architecture guidance aligned with the runtime.</li>
+              </ul>
+            </article>
+          </div>
+        </section>
+
         <section className="thymos-section" id="coding-agent">
           <div className="thymos-section-head">
             <span className="thymos-kicker">Coding-agent surface</span>
@@ -493,17 +540,19 @@ export function ThymosLanding() {
             <div className="thymos-hero-actions">
               <a
                 className="thymos-primary-action"
-                href={siteConfig.githubUrl}
+                href={siteConfig.readmeUrl}
                 target="_blank"
                 rel="noreferrer"
               >
-                View source
+                Read the README
               </a>
               <a
                 className="thymos-secondary-action"
-                href="#workflow"
+                href={siteConfig.docsUrl}
+                target="_blank"
+                rel="noreferrer"
               >
-                See the workflow
+                Browse docs
               </a>
             </div>
           </div>

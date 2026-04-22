@@ -5,6 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "pages:preview": "npm run build && python3 -m http.server 4173 -d out",
+    "docs:check": "node scripts/check-docs.mjs",
+    "site:check": "npm run build && npm run docs:check",
     "start": "next start",
     "typecheck": "tsc --noEmit"
   },

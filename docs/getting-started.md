@@ -1,84 +1,176 @@
 ---
 layout: default
-title: Get Started
-eyebrow: 5 minutes · no keys required
-subtitle: Boot the runtime, run an agent, point it at a local model. In that order.
+title: Getting Started
+eyebrow: 5 minutes · easiest path first
+subtitle: Start the backend once, then attach from the surface you want to use.
 permalink: /getting-started/
 ---
 
-## 1 · Boot the runtime
+## The fast mental model
+
+You do **not** start a separate agent for every interface.
+
+You start the **Thymos runtime**, then attach to it from:
+
+- the web console
+- the CLI
+- the VS Code sidebar
+- the interactive shell / system terminal
+
+All of those clients observe the same run state when they point at the same backend.
+
+## 1. Start the Thymos runtime
 
 ```bash
-git clone https://github.com/gryszzz/THYMOS.git
-cd THYMOS/thymos
+git clone https://github.com/gryszzz/OpenThymos.git
+cd OpenThymos/thymos
 cargo run -p thymos-server
-# → listening on http://localhost:3001
-# → mock cognition (no key required)
 ```
 
-The server boots with an in-memory ledger and a mock cognition. No API key
-needed. Hit `http://localhost:3001/health` to confirm.
+Default behavior:
 
-## 2 · Run your first agent
+- server runs on `http://localhost:3001`
+- mock cognition is available, so you can test the full flow with no API key
+- runs are exposed through HTTP plus live SSE streams
+
+Check it:
 
 ```bash
-# In a second terminal
-cargo run -p thymos-cli -- run "Set greeting to hello and read it back" \
-    --provider mock
+curl http://localhost:3001/health
 ```
 
-The mock cognition deterministically runs the IPC Triad end-to-end. You
-will see a trajectory id, stream of intents, and a final answer.
+## 2. Choose your interface
 
-## 3 · Drive it with a real model
+### Option A: Web console
 
-Pick one. All three work with the same CLI, same ledger, same runtime.
-
-### Anthropic (Opus 4.7)
+From the repo root:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... cargo run -p thymos-server
-cargo run -p thymos-cli -- run "..." --provider anthropic --model opus
+npm install
+npm run dev
 ```
 
-### OpenAI (GPT-4o family)
+Open:
+
+`http://localhost:3000/runs`
+
+Validate the exported GitHub Pages site plus the markdown docs before you push:
 
 ```bash
-OPENAI_API_KEY=sk-... cargo run -p thymos-server
-cargo run -p thymos-cli -- run "..." --provider openai --model gpt-4o
+npm run site:check
 ```
 
-### LM Studio (local, free, private)
-
-Start LM Studio's local server (default `http://localhost:1234/v1`). Load a
-tool-capable model — we recommend Qwen 2.5 Coder or a Llama 3.1 Instruct.
+Preview the static Pages export locally:
 
 ```bash
-# No key needed — LM Studio ignores the Authorization header
-OPENAI_BASE_URL=http://localhost:1234/v1 \
-OPENAI_API_KEY=lm-studio \
-cargo run -p thymos-server
-
-cargo run -p thymos-cli -- run "..." \
-    --provider local \
-    --model qwen2.5-coder-32b-instruct
+npm run pages:preview
 ```
 
-### Ollama
+Use this when you want:
+
+- the clearest onboarding path
+- the live execution console
+- the execution log
+- world replay and branching
+
+### Option B: CLI
+
+In another terminal:
 
 ```bash
-OPENAI_BASE_URL=http://localhost:11434/v1 \
-OPENAI_API_KEY=ollama \
-cargo run -p thymos-server
-
-cargo run -p thymos-cli -- run "..." \
-    --provider local \
-    --model llama3.1:8b
+cd thymos
+cargo run -p thymos-cli -- run "Inspect the repo and explain what Thymos is" --provider mock --follow
 ```
 
-## 4 · Production-shaped run
+Use this when you want:
 
-File-backed ledger, worker-sandboxed shell, persistent run store.
+- terminal-first workflow
+- live execution follow mode
+- run inspection, diffing, resume, and cancel commands
+
+### Option C: VS Code sidebar
+
+Build the extension:
+
+```bash
+cd thymos/clients/vscode
+npm install
+npm run compile
+```
+
+Then open the extension in VS Code's Extension Development Host and point it at:
+
+`http://localhost:3001`
+
+Use this when you want:
+
+- editor-native run visibility
+- approval review inside VS Code
+- a shared console without leaving your coding flow
+
+## 3. Submit your first task
+
+No model key required:
+
+```bash
+cd thymos
+cargo run -p thymos-cli -- run "Map the repo and summarize the execution runtime" --provider mock --follow
+```
+
+What you should see:
+
+1. a run is created
+2. the execution session starts updating
+3. the runtime emits intent / proposal / execution / result events
+4. the run finishes with a final answer
+
+## 4. Switch to a real model
+
+Thymos keeps the same runtime and tool model. You only swap the proposer.
+
+### Anthropic
+
+```bash
+ANTHROPIC_API_KEY=... cargo run -p thymos-server
+```
+
+### OpenAI
+
+```bash
+OPENAI_API_KEY=... cargo run -p thymos-server
+```
+
+### Local OpenAI-compatible backend
+
+```bash
+OPENAI_BASE_URL=http://localhost:1234/v1 OPENAI_API_KEY=local cargo run -p thymos-server
+```
+
+Then create runs with the provider you want from the web app, CLI, or API.
+
+## 5. Understand what you are looking at
+
+Every run follows the same structure:
+
+### Intent
+
+The model declares what it wants to do next.
+
+### Proposal
+
+The runtime compiles and policy-checks that action under the active writ.
+
+### Execution
+
+The tool runs for real and the runtime observes the result.
+
+### Result
+
+The run records a commit, rejection, suspension, failure, or completion event.
+
+## 6. Production-shaped mode
+
+For persistent, safer runtime behavior:
 
 ```bash
 cargo build --release -p thymos-worker
@@ -93,10 +185,15 @@ THYMOS_WORKER_BIN=$PWD/target/release/thymos-worker \
 cargo run -p thymos-server
 ```
 
-## 5 · What to read next
+Use this when you want:
 
-- [Coding Agent]({{ '/coding-agent' | relative_url }}) — the flagship surface.
-- [Architecture]({{ '/architecture' | relative_url }}) — IPC Triad, planes, invariants.
-- [Secure Tool Fabric]({{ '/secure-tool-fabric' | relative_url }}) — how risky tools run.
-- [API Reference]({{ '/api-reference' | relative_url }}) — HTTP surface.
-- [Roadmap]({{ '/roadmap' | relative_url }}) — what's next.
+- file-backed run history
+- worker-backed tool execution
+- a more production-shaped runtime boundary
+
+## Where to go next
+
+- [Interfaces]({{ '/interfaces' | relative_url }}) — pick the surface that fits you
+- [Coding Agent]({{ '/coding-agent' | relative_url }}) — understand the autonomous coding loop
+- [Architecture]({{ '/architecture' | relative_url }}) — see how the shared runtime is built
+- [API Reference]({{ '/api-reference' | relative_url }}) — drive it over HTTP
