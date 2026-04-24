@@ -47,6 +47,13 @@ cargo run -p thymos-server
 
 By default this starts Thymos on `http://localhost:3001` with mock cognition, so you can test the full runtime with no API key.
 
+Runtime probes:
+
+```bash
+curl http://localhost:3001/health
+curl http://localhost:3001/ready
+```
+
 ### 2. Pick the surface you want to use
 
 **Web console**
@@ -95,6 +102,15 @@ OPENAI_API_KEY=... cargo run -p thymos-server
 
 # Local OpenAI-compatible server
 OPENAI_BASE_URL=http://localhost:1234/v1 OPENAI_API_KEY=local cargo run -p thymos-server
+```
+
+For production-shaped deployments, also configure:
+
+```bash
+THYMOS_BIND_ADDR=0.0.0.0:3001
+THYMOS_ALLOWED_ORIGINS=https://your-console.example.com
+THYMOS_MAX_CONCURRENT_RUNS_GLOBAL=100
+THYMOS_MAX_CONCURRENT_RUNS_PER_TENANT=20
 ```
 
 ## The Operator Experience

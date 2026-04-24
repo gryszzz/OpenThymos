@@ -213,11 +213,7 @@ impl ApiKeyStore {
     /// Atomically increment the per-key counter in the current 60s window and
     /// return the new count. If the window has expired, resets it first. This
     /// is the shared-state path used for distributed rate limiting.
-    pub fn incr_and_count(
-        &self,
-        api_key: &str,
-        window_secs: u64,
-    ) -> Result<(u32, u64), String> {
+    pub fn incr_and_count(&self, api_key: &str, window_secs: u64) -> Result<(u32, u64), String> {
         let conn = self.conn.lock().unwrap();
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
 
@@ -234,9 +230,7 @@ impl ApiKeyStore {
             .ok();
 
         let (new_count, window_start) = match existing {
-            Some((count, start)) if (now - start) < window_secs as i64 => {
-                (count as u32 + 1, start)
-            }
+            Some((count, start)) if (now - start) < window_secs as i64 => (count as u32 + 1, start),
             _ => (1, now),
         };
 
@@ -329,8 +323,8 @@ pub async fn api_key_middleware(
     request: Request,
     next: Next,
 ) -> impl IntoResponse {
-    // Skip auth for health check.
-    if request.uri().path() == "/health" {
+    // Skip auth for health and readiness checks.
+    if matches!(request.uri().path(), "/health" | "/ready") {
         return next.run(request).await.into_response();
     }
 

@@ -243,7 +243,10 @@ async fn dispatch(
             println!("  task: {}", parsed.task);
             println!("  provider: {}", parsed.provider);
             if state.workspace.is_some() {
-                println!("  workspace: {}", state.workspace.as_ref().unwrap().display());
+                println!(
+                    "  workspace: {}",
+                    state.workspace.as_ref().unwrap().display()
+                );
             }
             if parsed.follow {
                 println!("--- streaming ---");
@@ -411,7 +414,9 @@ fn set_value(state: &mut ShellState, args: &[&str]) -> Result<(), String> {
             }
         }
         "max_steps" | "max-steps" => {
-            state.max_steps = value.parse().map_err(|_| format!("bad max_steps: {value}"))?;
+            state.max_steps = value
+                .parse()
+                .map_err(|_| format!("bad max_steps: {value}"))?;
         }
         "scopes" => {
             state.scopes = if value == "none" {
@@ -426,7 +431,11 @@ fn set_value(state: &mut ShellState, args: &[&str]) -> Result<(), String> {
                 "prompt" => ApprovePolicy::Prompt,
                 "approve" | "yes" | "on" => ApprovePolicy::Approve,
                 "deny" | "no" | "off" => ApprovePolicy::Deny,
-                _ => return Err(format!("auto_approve: expected prompt|approve|deny, got {value}")),
+                _ => {
+                    return Err(format!(
+                        "auto_approve: expected prompt|approve|deny, got {value}"
+                    ))
+                }
             }
         }
         "workspace" => {
@@ -638,7 +647,10 @@ async fn auto_loop(
     run_id: &str,
     state: &ShellState,
 ) -> Result<(), String> {
-    println!("[auto] run {run_id} — polling; {} approvals", state.auto_approve.as_str());
+    println!(
+        "[auto] run {run_id} — polling; {} approvals",
+        state.auto_approve.as_str()
+    );
     let mut handled_seqs: HashSet<u64> = HashSet::new();
     let mut last_printed_status: Option<String> = None;
     let mut last_log_idx = 0u64;

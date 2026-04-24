@@ -37,6 +37,7 @@ Check it:
 
 ```bash
 curl http://localhost:3001/health
+curl http://localhost:3001/ready
 ```
 
 ## 2. Choose your interface
@@ -176,10 +177,14 @@ For persistent, safer runtime behavior:
 cargo build --release -p thymos-worker
 
 THYMOS_RUNTIME_MODE=production \
+THYMOS_BIND_ADDR=0.0.0.0:3001 \
 THYMOS_LEDGER_PATH=thymos-ledger.db \
 THYMOS_DB_PATH=thymos-runs.db \
 THYMOS_GATEWAY_DB_PATH=thymos-gateway.db \
 THYMOS_MARKETPLACE_DB_PATH=thymos-marketplace.db \
+THYMOS_ALLOWED_ORIGINS=https://your-console.example.com \
+THYMOS_MAX_CONCURRENT_RUNS_GLOBAL=100 \
+THYMOS_MAX_CONCURRENT_RUNS_PER_TENANT=20 \
 THYMOS_TOOL_FABRIC=worker \
 THYMOS_WORKER_BIN=$PWD/target/release/thymos-worker \
 cargo run -p thymos-server
@@ -189,6 +194,8 @@ Use this when you want:
 
 - file-backed run history
 - worker-backed tool execution
+- explicit browser origin policy
+- deploy-time concurrency tuning
 - a more production-shaped runtime boundary
 
 ## Where to go next

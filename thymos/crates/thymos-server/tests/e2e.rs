@@ -16,6 +16,9 @@ fn test_state() -> Arc<AppState> {
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     Arc::new(AppState {
         runtime_mode: thymos_server::RuntimeMode::Reference,
+        cors_allowed_origins: None,
+        max_concurrent_runs_per_tenant: thymos_server::MAX_CONCURRENT_RUNS_PER_TENANT,
+        max_concurrent_runs_global: thymos_server::MAX_CONCURRENT_RUNS_GLOBAL,
         runtime: default_runtime(),
         runs: Mutex::new(HashMap::new()),
         event_channels: Mutex::new(HashMap::new()),
@@ -44,6 +47,16 @@ async fn health_check() {
     resp.assert_status_ok();
     let body: Value = resp.json();
     assert_eq!(body["status"], "ok");
+}
+
+#[tokio::test]
+async fn ready_check() {
+    let server = test_server(test_state());
+    let resp = server.get("/ready").await;
+    resp.assert_status_ok();
+    let body: Value = resp.json();
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["checks"]["run_store"], false);
 }
 
 #[tokio::test]
@@ -186,7 +199,10 @@ async fn world_on_completed_run_returns_projection() {
     let resp = server.get(&format!("/runs/{run_id}/world")).await;
     resp.assert_status_ok();
     let body: Value = resp.json();
-    assert!(body["resources"].is_array(), "unexpected world body: {body}");
+    assert!(
+        body["resources"].is_array(),
+        "unexpected world body: {body}"
+    );
 }
 
 #[tokio::test]
@@ -326,6 +342,9 @@ fn jwt_test_state() -> Arc<AppState> {
     let jwt_config = Arc::new(auth::JwtConfig::from_secret(b"test-secret-key"));
     Arc::new(AppState {
         runtime_mode: thymos_server::RuntimeMode::Reference,
+        cors_allowed_origins: None,
+        max_concurrent_runs_per_tenant: thymos_server::MAX_CONCURRENT_RUNS_PER_TENANT,
+        max_concurrent_runs_global: thymos_server::MAX_CONCURRENT_RUNS_GLOBAL,
         runtime: default_runtime(),
         runs: Mutex::new(HashMap::new()),
         event_channels: Mutex::new(HashMap::new()),
@@ -355,6 +374,9 @@ fn gateway_test_state() -> Arc<AppState> {
     .unwrap();
     Arc::new(AppState {
         runtime_mode: thymos_server::RuntimeMode::Reference,
+        cors_allowed_origins: None,
+        max_concurrent_runs_per_tenant: thymos_server::MAX_CONCURRENT_RUNS_PER_TENANT,
+        max_concurrent_runs_global: thymos_server::MAX_CONCURRENT_RUNS_GLOBAL,
         runtime: default_runtime(),
         runs: Mutex::new(HashMap::new()),
         event_channels: Mutex::new(HashMap::new()),

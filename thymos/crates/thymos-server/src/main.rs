@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use thymos_server::{
     app, auth, default_runtime, middleware, persistent_runtime, run_store, telemetry, AppState,
-    RuntimeMode, ServerConfig,
+    RunStatus, RunSummaryDto, RuntimeMode, ServerConfig,
 };
 
 #[tokio::main]
@@ -109,13 +109,22 @@ async fn main() {
             eprintln!("run store: {}", config.run_db_path);
             Some(Arc::new(store))
         }
-        Err(e) => {
-            eprintln!(
-                "warn: failed to open run store at {}: {e}",
-                config.run_db_path
-            );
-            None
-        }
+        Err(e) => match config.runtime_mode {
+            RuntimeMode::Production => {
+                eprintln!(
+                    "fatal: failed to open run store at {}: {e}",
+                    config.run_db_path
+                );
+                std::process::exit(2);
+            }
+            RuntimeMode::Reference => {
+                eprintln!(
+                    "warn: failed to open run store at {}: {e}",
+                    config.run_db_path
+                );
+                None
+            }
+        },
     };
 
     let marketplace =
@@ -124,13 +133,22 @@ async fn main() {
                 eprintln!("marketplace store: {}", config.marketplace_db_path);
                 Arc::new(service)
             }
-            Err(e) => {
-                eprintln!(
-                    "warn: failed to open marketplace store at {}: {}",
-                    config.marketplace_db_path, e
-                );
-                Arc::new(thymos_marketplace::MarketplaceService::in_memory())
-            }
+            Err(e) => match config.runtime_mode {
+                RuntimeMode::Production => {
+                    eprintln!(
+                        "fatal: failed to open marketplace store at {}: {}",
+                        config.marketplace_db_path, e
+                    );
+                    std::process::exit(2);
+                }
+                RuntimeMode::Reference => {
+                    eprintln!(
+                        "warn: failed to open marketplace store at {}: {}",
+                        config.marketplace_db_path, e
+                    );
+                    Arc::new(thymos_marketplace::MarketplaceService::in_memory())
+                }
+            },
         };
 
     // Restore previously persisted runs into memory.
@@ -154,6 +172,9 @@ async fn main() {
 
     let state = Arc::new(AppState {
         runtime_mode: config.runtime_mode,
+        cors_allowed_origins: config.cors_allowed_origins.clone(),
+        max_concurrent_runs_per_tenant: config.max_concurrent_runs_per_tenant,
+        max_concurrent_runs_global: config.max_concurrent_runs_global,
         runtime,
         runs: Mutex::new(restored_runs),
         event_channels: Mutex::new(HashMap::new()),
@@ -171,16 +192,16 @@ async fn main() {
     });
 
     let app = app(state.clone());
-    let addr = "0.0.0.0:3001";
     eprintln!(
-        "thymos-server listening on {addr} ({})",
+        "thymos-server listening on {} ({})",
+        config.bind_addr,
         match config.runtime_mode {
             RuntimeMode::Reference => "reference mode",
             RuntimeMode::Production => "production mode",
         }
     );
 
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
         .expect("bind failed");
 
@@ -205,6 +226,12 @@ async fn main() {
 
             // Signal all run handlers to stop accepting new work.
             let _ = state_for_shutdown.shutdown_tx.send(true);
+            {
+                let tokens = state_for_shutdown.cancellation_tokens.lock().unwrap();
+                for sender in tokens.values() {
+                    let _ = sender.send(true);
+                }
+            }
 
             // Wait for active runs to drain (up to 30 seconds).
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -221,9 +248,40 @@ async fn main() {
                     );
                     // Mark running runs as failed so they can be resumed.
                     let mut runs = state_for_shutdown.runs.lock().unwrap();
-                    for (_id, rec) in runs.iter_mut() {
+                    for (run_id, rec) in runs.iter_mut() {
                         if rec.status == thymos_server::RunStatus::Running {
-                            rec.status = thymos_server::RunStatus::Failed;
+                            rec.status = RunStatus::Failed;
+                            let summary = RunSummaryDto {
+                                steps_executed: 0,
+                                intents_submitted: 0,
+                                commits: 0,
+                                rejections: 0,
+                                failures: 1,
+                                final_answer: Some(
+                                    "server shutdown timed out while the run was still active"
+                                        .into(),
+                                ),
+                                terminated_by: "ShutdownTimeout".into(),
+                            };
+                            rec.summary = Some(summary.clone());
+                            if let Some(store) = &state_for_shutdown.run_store {
+                                let _ = store.update(
+                                    run_id,
+                                    &rec.trajectory_id,
+                                    "failed",
+                                    Some(&summary),
+                                );
+                            }
+                            if let Some(session) = state_for_shutdown
+                                .execution_sessions
+                                .lock()
+                                .unwrap()
+                                .get_mut(run_id)
+                            {
+                                session.mark_failed(
+                                    "server shutdown timed out while the run was still active",
+                                );
+                            }
                         }
                     }
                     break;

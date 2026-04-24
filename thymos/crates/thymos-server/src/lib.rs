@@ -23,7 +23,7 @@ pub mod telemetry;
 
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{
         sse::{Event, Sse},
         IntoResponse, Json,
@@ -34,7 +34,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::{broadcast, oneshot, watch};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 
 use execution::ExecutionSession;
 use thymos_cognition::{build_cognition, CognitionConfig, CognitionEvent, NonStreamingAdapter};
@@ -46,7 +46,9 @@ use thymos_core::{
 use thymos_ledger::{EntryPayload, Ledger};
 use thymos_policy::{PolicyEngine, WritAuthorityPolicy};
 use thymos_runtime::agent_async::ApprovalDecision;
-use thymos_runtime::{AgentEventCallback, AgentRunOptions, AgentRunSummary, AgentTraceEvent, Runtime, Termination};
+use thymos_runtime::{
+    AgentEventCallback, AgentRunOptions, AgentRunSummary, AgentTraceEvent, Runtime, Termination,
+};
 use thymos_tools::{
     DelegateTool, FsPatchTool, FsReadTool, GrepTool, HttpTool, KvGetTool, KvSetTool, ListFilesTool,
     MemoryRecallTool, MemoryStoreTool, RepoMapTool, ShellTool, TestRunTool, ToolRegistry,
@@ -75,16 +77,21 @@ impl RuntimeMode {
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub runtime_mode: RuntimeMode,
+    pub bind_addr: String,
     pub ledger_path: Option<String>,
     pub postgres_url: Option<String>,
     pub run_db_path: String,
     pub gateway_db_path: String,
     pub marketplace_db_path: String,
+    pub cors_allowed_origins: Option<Vec<String>>,
+    pub max_concurrent_runs_per_tenant: u32,
+    pub max_concurrent_runs_global: u32,
 }
 
 impl ServerConfig {
     pub fn from_env() -> Result<Self, String> {
         let runtime_mode = RuntimeMode::from_env()?;
+        let bind_addr = std::env::var("THYMOS_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3001".into());
         let ledger_path = std::env::var("THYMOS_LEDGER_PATH").ok();
         let postgres_url = std::env::var("THYMOS_POSTGRES_URL").ok();
         let run_db_path =
@@ -96,6 +103,15 @@ impl ServerConfig {
         let tool_fabric =
             std::env::var("THYMOS_TOOL_FABRIC").unwrap_or_else(|_| "in_process".into());
         let worker_bin = std::env::var("THYMOS_WORKER_BIN").ok();
+        let cors_allowed_origins = parse_list_env("THYMOS_ALLOWED_ORIGINS");
+        let max_concurrent_runs_per_tenant = parse_u32_env(
+            "THYMOS_MAX_CONCURRENT_RUNS_PER_TENANT",
+            MAX_CONCURRENT_RUNS_PER_TENANT,
+        )?;
+        let max_concurrent_runs_global = parse_u32_env(
+            "THYMOS_MAX_CONCURRENT_RUNS_GLOBAL",
+            MAX_CONCURRENT_RUNS_GLOBAL,
+        )?;
 
         if runtime_mode == RuntimeMode::Production && ledger_path.is_none() {
             if postgres_url.is_some() {
@@ -121,14 +137,63 @@ impl ServerConfig {
             );
         }
 
+        if runtime_mode == RuntimeMode::Production
+            && cors_allowed_origins
+                .as_ref()
+                .is_none_or(|origins| origins.is_empty())
+        {
+            return Err(
+                "production mode requires THYMOS_ALLOWED_ORIGINS to be set to a comma-separated list of allowed browser origins".into(),
+            );
+        }
+
+        if max_concurrent_runs_per_tenant == 0 || max_concurrent_runs_global == 0 {
+            return Err("concurrency limits must be greater than zero".into());
+        }
+
+        if max_concurrent_runs_per_tenant > max_concurrent_runs_global {
+            return Err(
+                "THYMOS_MAX_CONCURRENT_RUNS_PER_TENANT cannot exceed THYMOS_MAX_CONCURRENT_RUNS_GLOBAL".into(),
+            );
+        }
+
         Ok(Self {
             runtime_mode,
+            bind_addr,
             ledger_path,
             postgres_url,
             run_db_path,
             gateway_db_path,
             marketplace_db_path,
+            cors_allowed_origins,
+            max_concurrent_runs_per_tenant,
+            max_concurrent_runs_global,
         })
+    }
+}
+
+fn parse_list_env(key: &str) -> Option<Vec<String>> {
+    std::env::var(key).ok().and_then(|raw| {
+        let values = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            None
+        } else {
+            Some(values)
+        }
+    })
+}
+
+fn parse_u32_env(key: &str, default: u32) -> Result<u32, String> {
+    match std::env::var(key) {
+        Ok(value) => value
+            .parse::<u32>()
+            .map_err(|_| format!("{key} must be a positive integer")),
+        Err(_) => Ok(default),
     }
 }
 
@@ -204,6 +269,9 @@ pub struct ResourceDto {
 /// Shared application state.
 pub struct AppState {
     pub runtime_mode: RuntimeMode,
+    pub cors_allowed_origins: Option<Vec<String>>,
+    pub max_concurrent_runs_per_tenant: u32,
+    pub max_concurrent_runs_global: u32,
     pub runtime: Arc<Runtime>,
     pub runs: Mutex<HashMap<String, RunRecord>>,
     /// Ledger entry events per run.
@@ -304,8 +372,10 @@ fn build_runtime(ledger: Ledger) -> Arc<Runtime> {
 /// Build the axum Router.
 pub fn app(state: Arc<AppState>) -> Router {
     let marketplace_state = state.marketplace.clone();
+    let cors = cors_layer(&state);
     let mut router = Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/runs", get(list_runs).post(create_run))
         .route("/runs/{id}", get(get_run))
         .route("/runs/{id}/execution", get(get_execution))
@@ -340,10 +410,27 @@ pub fn app(state: Arc<AppState>) -> Router {
     }
 
     router
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state)
         // Marketplace routes have their own state type, so merge after with_state.
         .merge(marketplace_api::marketplace_router(marketplace_state))
+}
+
+fn cors_layer(state: &Arc<AppState>) -> CorsLayer {
+    let base = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(Any);
+
+    match &state.cors_allowed_origins {
+        Some(origins) if !origins.is_empty() => {
+            let headers = origins
+                .iter()
+                .filter_map(|origin| HeaderValue::from_str(origin).ok())
+                .collect::<Vec<_>>();
+            base.allow_origin(headers)
+        }
+        _ => base.allow_origin(Any),
+    }
 }
 
 /// Extract tenant_id from request context.
@@ -388,7 +475,10 @@ fn status_str(status: &RunStatus) -> &'static str {
     }
 }
 
-fn ensure_execution_channel(state: &Arc<AppState>, run_id: &str) -> broadcast::Sender<ExecutionSession> {
+fn ensure_execution_channel(
+    state: &Arc<AppState>,
+    run_id: &str,
+) -> broadcast::Sender<ExecutionSession> {
     let mut channels = state.execution_channels.lock().unwrap();
     channels
         .entry(run_id.to_string())
@@ -408,8 +498,13 @@ fn publish_execution_session(state: &Arc<AppState>, run_id: &str, session: Execu
     let _ = tx.send(session);
 }
 
-fn with_execution_session<F>(state: &Arc<AppState>, run_id: &str, task: &str, max_steps: u32, mut f: F)
-where
+fn with_execution_session<F>(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task: &str,
+    max_steps: u32,
+    mut f: F,
+) where
     F: FnMut(&mut ExecutionSession),
 {
     let session = {
@@ -444,8 +539,39 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "mode": match state.runtime_mode {
             RuntimeMode::Reference => "reference",
             RuntimeMode::Production => "production",
-        }
+        },
+        "shutdown": *state.shutdown_tx.borrow(),
     }))
+}
+
+async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let shutting_down = *state.shutdown_tx.borrow();
+    let run_store_ready = state.run_store.is_some();
+    let marketplace_ready = true;
+    let ready = !shutting_down
+        && match state.runtime_mode {
+            RuntimeMode::Reference => true,
+            RuntimeMode::Production => run_store_ready && marketplace_ready,
+        };
+
+    let body = serde_json::json!({
+        "status": if ready { "ready" } else { "not_ready" },
+        "mode": match state.runtime_mode {
+            RuntimeMode::Reference => "reference",
+            RuntimeMode::Production => "production",
+        },
+        "shutdown": shutting_down,
+        "checks": {
+            "run_store": run_store_ready,
+            "marketplace": marketplace_ready,
+        }
+    });
+
+    if ready {
+        (StatusCode::OK, Json(body)).into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response()
+    }
 }
 
 /// GET /usage — per-key usage stats dashboard.
@@ -557,7 +683,11 @@ async fn resume_run(
         let mut channels = state.execution_channels.lock().unwrap();
         channels.insert(id.clone(), execution_tx);
     }
-    publish_execution_session(&state, &id, ExecutionSession::new(&id, &req.task, req.max_steps));
+    publish_execution_session(
+        &state,
+        &id,
+        ExecutionSession::new(&id, &req.task, req.max_steps),
+    );
 
     let runtime = state.runtime.clone();
     let state2 = state.clone();
@@ -625,9 +755,15 @@ async fn resume_run(
         let trace_task = task.clone();
         let trace_max_steps = req.max_steps;
         let trace_tx: AgentEventCallback = Arc::new(move |event: AgentTraceEvent| {
-            with_execution_session(&trace_state, &trace_run_id, &trace_task, trace_max_steps, |session| {
-                session.apply_trace(event.clone());
-            });
+            with_execution_session(
+                &trace_state,
+                &trace_run_id,
+                &trace_task,
+                trace_max_steps,
+                |session| {
+                    session.apply_trace(event.clone());
+                },
+            );
         });
 
         let result = thymos_runtime::run_agent_streaming(
@@ -758,10 +894,10 @@ async fn create_run(
 
     // Global concurrency check.
     let active = state.active_runs.load(Ordering::Relaxed);
-    if active >= MAX_CONCURRENT_RUNS_GLOBAL {
+    if active >= state.max_concurrent_runs_global {
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({ "error": "server at capacity" })),
+            Json(serde_json::json!({ "error": format!("server at capacity ({})", state.max_concurrent_runs_global) })),
         )
             .into_response();
     }
@@ -775,9 +911,9 @@ async fn create_run(
             .values()
             .filter(|r| r.tenant_id == tenant_id && r.status == RunStatus::Running)
             .count() as u32;
-        if tenant_running >= MAX_CONCURRENT_RUNS_PER_TENANT {
+        if tenant_running >= state.max_concurrent_runs_per_tenant {
             return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({
-                "error": format!("tenant has reached max concurrent runs ({MAX_CONCURRENT_RUNS_PER_TENANT})")
+                "error": format!("tenant has reached max concurrent runs ({})", state.max_concurrent_runs_per_tenant)
             }))).into_response();
         }
     }
@@ -885,7 +1021,11 @@ async fn create_run(
     if let Some(store) = &state.run_store {
         let _ = store.insert(&run_id, &task, &tenant_id);
     }
-    publish_execution_session(&state, &run_id, ExecutionSession::new(&run_id, &task, req.max_steps));
+    publish_execution_session(
+        &state,
+        &run_id,
+        ExecutionSession::new(&run_id, &task, req.max_steps),
+    );
 
     // Spawn the agent as an async task with streaming cognition.
     // Create cancellation token for this run.
@@ -932,9 +1072,15 @@ async fn create_run(
         let trace_task = task2.clone();
         let trace_max_steps = req.max_steps;
         let trace_tx: AgentEventCallback = Arc::new(move |event: AgentTraceEvent| {
-            with_execution_session(&trace_state, &trace_run_id, &trace_task, trace_max_steps, |session| {
-                session.apply_trace(event.clone());
-            });
+            with_execution_session(
+                &trace_state,
+                &trace_run_id,
+                &trace_task,
+                trace_max_steps,
+                |session| {
+                    session.apply_trace(event.clone());
+                },
+            );
         });
 
         let agent_fut = thymos_runtime::run_agent_streaming(
@@ -1443,7 +1589,8 @@ async fn get_world_at(
     let result = tokio::task::spawn_blocking(move || {
         let mut entries = runtime.ledger.entries(trajectory_id)?;
         entries.retain(|e| e.seq <= until_seq);
-        let (world, report) = thymos_ledger::replay(&entries, &thymos_ledger::ReplayConfig::default())?;
+        let (world, report) =
+            thymos_ledger::replay(&entries, &thymos_ledger::ReplayConfig::default())?;
         let resources: Vec<ResourceDto> = world
             .resources
             .iter()
@@ -1562,7 +1709,9 @@ async fn cancel_run(
             let _ = tx.send(true);
             let task = {
                 let runs = state.runs.lock().unwrap();
-                runs.get(&id).map(|rec| rec.task.clone()).unwrap_or_else(|| "cancelled run".into())
+                runs.get(&id)
+                    .map(|rec| rec.task.clone())
+                    .unwrap_or_else(|| "cancelled run".into())
             };
             with_execution_session(&state, &id, &task, 1, |session| {
                 session.mark_cancelled();

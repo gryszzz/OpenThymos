@@ -10,6 +10,9 @@ fn test_state() -> Arc<AppState> {
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     Arc::new(AppState {
         runtime_mode: RuntimeMode::Reference,
+        cors_allowed_origins: None,
+        max_concurrent_runs_per_tenant: thymos_server::MAX_CONCURRENT_RUNS_PER_TENANT,
+        max_concurrent_runs_global: thymos_server::MAX_CONCURRENT_RUNS_GLOBAL,
         runtime: default_runtime(),
         runs: Mutex::new(HashMap::new()),
         event_channels: Mutex::new(HashMap::new()),
@@ -232,7 +235,10 @@ exit
         output.status.success(),
         "shell exited non-zero:\nstdout:\n{out}\nstderr:\n{err}"
     );
-    assert!(out.contains("preset        coding"), "preset missing: {out}");
+    assert!(
+        out.contains("preset        coding"),
+        "preset missing: {out}"
+    );
     assert!(
         out.contains("max_steps     64"),
         "preset did not bump max_steps: {out}"

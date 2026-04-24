@@ -85,7 +85,7 @@ impl JwtConfig {
 /// Axum middleware that verifies JWTs and injects `JwtClaims` into request
 /// extensions. Requests without a valid JWT are rejected with 401.
 ///
-/// Skips `/health` and allows API-key-based auth to coexist (if
+/// Skips `/health` + `/ready` and allows API-key-based auth to coexist (if
 /// `x-thymos-user-id` header is already set, JWT check is skipped — the
 /// API gateway already authenticated the request).
 pub async fn jwt_middleware(
@@ -95,8 +95,8 @@ pub async fn jwt_middleware(
 ) -> impl IntoResponse {
     let path = request.uri().path().to_string();
 
-    // Skip auth for health check.
-    if path == "/health" {
+    // Skip auth for health and readiness checks.
+    if matches!(path.as_str(), "/health" | "/ready") {
         return next.run(request).await.into_response();
     }
 
