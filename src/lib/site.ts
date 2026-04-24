@@ -1,4 +1,29 @@
-const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
+function normalizeBasePath(value: string | undefined): string {
+  const trimmed = value?.trim() ?? "";
+
+  if (!trimmed || trimmed === "/") {
+    return "";
+  }
+
+  return `/${trimmed.replace(/^\/+|\/+$/g, "")}`;
+}
+
+function normalizeSiteUrl(value: string | undefined): string {
+  const trimmed = value?.trim().replace(/\/+$/, "") ?? "";
+
+  if (trimmed) {
+    return trimmed;
+  }
+
+  const customDomain = process.env.PAGES_CUSTOM_DOMAIN?.trim().replace(/\/+$/, "");
+  if (customDomain) {
+    return `https://${customDomain.replace(/^https?:\/\//, "")}`;
+  }
+
+  return "https://gryszzz.github.io/OpenThymos";
+}
+
+const basePath = normalizeBasePath(process.env.NEXT_PUBLIC_BASE_PATH);
 const githubUrl = "https://github.com/gryszzz/OpenThymos";
 
 export const siteConfig = {
@@ -8,6 +33,7 @@ export const siteConfig = {
   subheadline:
     "OpenThymos turns model output into typed intents, checks them against signed authority, executes approved tools, and records every outcome in a replayable ledger.",
   basePath,
+  siteUrl: normalizeSiteUrl(process.env.NEXT_PUBLIC_SITE_URL),
   supportEmail: "team@thymos.ai",
   githubUrl,
   docsUrl: `${githubUrl}/tree/main/docs`,

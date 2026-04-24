@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
@@ -31,11 +32,56 @@ fn test_state() -> Arc<AppState> {
 }
 
 fn run_cli(url: &str, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_thymos"))
+    Command::new(thymos_bin())
         .args(["--url", url])
         .args(args)
         .output()
         .expect("run thymos cli")
+}
+
+fn thymos_bin() -> PathBuf {
+    let cargo_bin = PathBuf::from(env!("CARGO_BIN_EXE_thymos"));
+    if cargo_bin.exists() {
+        return cargo_bin;
+    }
+
+    let deps_dir = std::env::current_exe()
+        .expect("current test exe")
+        .parent()
+        .expect("test exe parent")
+        .to_path_buf();
+
+    let mut candidates = std::fs::read_dir(&deps_dir)
+        .expect("read target deps dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path.extension().is_none()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("thymos-") && !name.ends_with(".d"))
+        })
+        .filter_map(|path| {
+            let modified = path.metadata().and_then(|meta| meta.modified()).ok()?;
+            Some((modified, path))
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|(left, _), (right, _)| right.cmp(left));
+
+    candidates
+        .into_iter()
+        .map(|(_, path)| path)
+        .find(|path| {
+            Command::new(path)
+                .arg("--help")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        })
+        .expect("locate compiled thymos binary")
 }
 
 fn stdout(output: &std::process::Output) -> String {
@@ -149,7 +195,7 @@ show
 exit
 ";
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_thymos"))
+    let mut child = Command::new(thymos_bin())
         .args(["--url", &url, "shell"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -215,7 +261,7 @@ exit
 "
     );
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_thymos"))
+    let mut child = Command::new(thymos_bin())
         .args(["--url", &url, "shell"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

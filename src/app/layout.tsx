@@ -4,6 +4,8 @@ import { IBM_Plex_Sans, Space_Grotesk } from "next/font/google";
 import { siteConfig } from "@/lib/site";
 import "./globals.css";
 
+const socialImage = "/thymos-mark.png";
+
 const bodyFont = IBM_Plex_Sans({
   subsets: ["latin"],
   variable: "--font-body",
@@ -16,8 +18,33 @@ const displayFont = Space_Grotesk({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(siteConfig.siteUrl),
   title: `${siteConfig.name} | Governed Execution Runtime`,
   description: siteConfig.subheadline,
+  alternates: {
+    canonical: "/",
+  },
+  openGraph: {
+    title: `${siteConfig.name} | Governed Execution Runtime`,
+    description: siteConfig.subheadline,
+    url: siteConfig.siteUrl,
+    siteName: siteConfig.name,
+    type: "website",
+    images: [
+      {
+        url: socialImage,
+        width: 1200,
+        height: 630,
+        alt: `${siteConfig.name} mark`,
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: `${siteConfig.name} | Governed Execution Runtime`,
+    description: siteConfig.subheadline,
+    images: [socialImage],
+  },
   icons: {
     icon: [
       { url: `${siteConfig.basePath}/favicon.ico`, sizes: "any" },

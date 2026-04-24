@@ -1,48 +1,94 @@
 <div align="center">
 
-<img src="thymos/Thymos-logo.PNG" alt="Thymos" width="128" height="128" />
+<img src="thymos/Thymos-logo.PNG" alt="Thymos" width="132" height="132" />
 
 # THYMOS
 
-**Provider-neutral execution framework for agentic software.**
+### Governed execution runtime for AI agents.
 
-*Intent -> Proposal -> Execution -> Result*
+**Intent -> Proposal -> Execution -> Result**
 
-[Website](https://gryszzz.github.io/OpenThymos/) · [Docs](docs) · [Wiki](https://github.com/gryszzz/OpenThymos/wiki) · [Rust Workspace](thymos) · [Getting Started](docs/getting-started.md)
+Thymos turns model output into typed, policy-checked, ledgered execution.<br />
+One runtime. Many surfaces. Real tools. Replayable history.
+
+<p>
+  <a href="https://gryszzz.github.io/OpenThymos/"><strong>Website</strong></a>
+  ·
+  <a href="docs/getting-started.md"><strong>Get Started</strong></a>
+  ·
+  <a href="docs/architecture.md"><strong>Architecture</strong></a>
+  ·
+  <a href="docs/api-reference.md"><strong>API</strong></a>
+  ·
+  <a href="https://github.com/gryszzz/OpenThymos/wiki"><strong>Wiki</strong></a>
+</p>
+
+<p>
+  <img alt="Runtime" src="https://img.shields.io/badge/runtime-Rust-111827?style=for-the-badge" />
+  <img alt="Console" src="https://img.shields.io/badge/console-Next.js-0f172a?style=for-the-badge" />
+  <img alt="Mode" src="https://img.shields.io/badge/cognition-local%20%2B%20hosted-0b3b5a?style=for-the-badge" />
+  <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-1f2937?style=for-the-badge" />
+</p>
 
 </div>
 
 ---
 
-## What Thymos Is
+## The Signal
 
-Thymos is not just a prompt wrapper or a tool-calling shell.
+Thymos is not a chatbot shell with a few tools bolted on.
 
-It is a **shared execution framework** for agentic work. A user can start a task from the CLI, a VS Code sidebar, a web console, or a terminal session and attach all of those surfaces to the **same live run**.
+It is an execution layer for agentic software. A model proposes work, but the
+runtime owns authority, policy, tool execution, observation, recovery, and the
+durable record of what happened.
 
-Each run moves through a structured flow:
-
-`Intent -> Proposal -> Execution -> Result`
-
-The model proposes work. The runtime decides whether that work is allowed under a signed writ, executes real tools, observes results, records everything in a durable ledger, and keeps going until the task is complete, blocked, or explicitly cancelled.
+```text
+              model output
+                   |
+                   v
+        +----------------------+
+        | typed Intent         |
+        +----------+-----------+
+                   |
+                   v
+        +----------------------+
+        | Proposal + policy    |
+        | writ + budget check  |
+        +----------+-----------+
+                   |
+                   v
+        +----------------------+
+        | real tool execution  |
+        | shell, files, HTTP   |
+        +----------+-----------+
+                   |
+                   v
+        +----------------------+
+        | ledgered Result      |
+        | replayable world     |
+        +----------------------+
+```
 
 The core idea is simple:
 
-`Model output becomes governed execution, not direct authority.`
+> Model output becomes governed execution, not direct authority.
 
-## What Makes It Different
+## High-Tech Capabilities
 
-- **One runtime, many surfaces.** CLI, VS Code, terminal, and web console reflect the same backend run state.
-- **Live by default.** The console consumes execution-session SSE snapshots, cognition streams, and periodic snapshot refreshes so users can watch real work while it happens.
-- **Agentic by design.** Thymos plans, executes, observes, retries, and adapts instead of stopping after every tool call.
-- **Real execution only.** File reads, patches, tests, shell calls, approvals, failures, and recoveries are all real runtime events.
-- **Fully observable.** Every run has a live execution session, clear status, and replayable execution log.
-- **Controlled, not chaotic.** Signed writs, policy checks, budgets, approvals, and typed tools keep autonomy bounded.
-- **Model-flexible.** Anthropic, OpenAI, LM Studio, Hugging Face, Ollama, and other OpenAI-compatible backends can all drive the same runtime.
+| Capability | What it gives you |
+| --- | --- |
+| **Shared runtime state** | CLI, VS Code, shell, and web console can attach to the same live run. |
+| **Typed action pipeline** | Every move flows through Intent, Proposal, Execution, and Result. |
+| **Signed authority** | Writs define who can do what, for how long, with which tool scopes and budgets. |
+| **Policy-gated effects** | Runtime checks happen before tools touch files, shell, HTTP, or state. |
+| **Live operator feed** | SSE streams expose cognition, execution sessions, approvals, failures, and completion. |
+| **Replayable trajectory ledger** | Runs become durable history, not terminal smoke. |
+| **Provider-neutral cognition** | Anthropic, OpenAI, LM Studio, Hugging Face, Ollama, local OpenAI-compatible servers, and mock runs can drive the same contract. |
+| **Production guardrails** | Production mode refuses unsafe defaults such as missing origin policy or in-process tool fabric. |
 
-## Start In 5 Minutes
+## Launch In 5 Minutes
 
-### 1. Start the backend runtime
+### 1. Boot the runtime
 
 ```bash
 git clone https://github.com/gryszzz/OpenThymos.git
@@ -50,18 +96,15 @@ cd OpenThymos/thymos
 cargo run -p thymos-server
 ```
 
-By default this starts Thymos on `http://localhost:3001` with mock cognition, so you can test the full runtime with no API key.
-
-Runtime probes:
+The server starts at `http://localhost:3001` with mock cognition by default,
+so you can exercise the full loop without an API key.
 
 ```bash
 curl http://localhost:3001/health
 curl http://localhost:3001/ready
 ```
 
-### 2. Pick the surface you want to use
-
-**Web console**
+### 2. Open the operator console
 
 ```bash
 cd ..
@@ -69,34 +112,35 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000/runs`.
+Open:
 
-Validate the static GitHub Pages export and the markdown docs before push:
-
-```bash
-npm run site:check
+```text
+http://localhost:3000/runs
 ```
 
-Preview the exported Pages build locally:
-
-```bash
-npm run pages:preview
-```
-
-**CLI**
+### 3. Fire a mock run
 
 ```bash
 cd thymos
 cargo run -p thymos-cli -- run "Inspect the repo and explain the runtime" --provider mock --follow
 ```
 
-**VS Code**
+You now have a real Thymos run flowing through the runtime with live status,
+execution state, and replayable output.
 
-Build the extension in [`thymos/clients/vscode`](thymos/clients/vscode), launch it in Extension Development Host, and point it at `http://localhost:3001`.
+## Choose Your Control Surface
 
-### 3. Use a real model when you are ready
+| Surface | Best for | Start here |
+| --- | --- | --- |
+| **Web console** | Live operator view, execution log, world replay, branching | `npm run dev`, then open `/runs` |
+| **CLI** | Terminal-first launch, follow, status, world, diff, resume, cancel | `cargo run -p thymos-cli -- --help` |
+| **VS Code sidebar** | Editor-native approvals and run visibility | [`thymos/clients/vscode`](thymos/clients/vscode) |
+| **System shell** | Persistent terminal workflow against the shared runtime | `cargo run -p thymos-cli -- shell` |
 
-Examples:
+## Real Model Mode
+
+Use mock mode for zero-key local validation. When you are ready, point the same
+runtime at hosted or local cognition.
 
 ```bash
 # Anthropic
@@ -109,7 +153,10 @@ OPENAI_API_KEY=... cargo run -p thymos-server
 OPENAI_BASE_URL=http://localhost:1234/v1 OPENAI_API_KEY=local cargo run -p thymos-server
 ```
 
-For production-shaped deployments, also configure:
+## Production Profile
+
+For production-shaped deployments, configure persistent stores, explicit
+browser origins, worker-backed tool execution, and bounded concurrency.
 
 ```bash
 THYMOS_RUNTIME_MODE=production
@@ -125,97 +172,74 @@ THYMOS_MAX_CONCURRENT_RUNS_GLOBAL=100
 THYMOS_MAX_CONCURRENT_RUNS_PER_TENANT=20
 ```
 
-In production mode the server validates these settings at startup and refuses unsafe defaults such as in-process shell/http execution or missing browser origin policy.
+In production mode the server validates these settings at startup and refuses
+unsafe defaults.
 
-## Production Readiness
+## Operator Experience
 
-Thymos is built to be usable without a hosted model and configurable for real deployments:
-
-- **Default cognition is `mock`.** The framework boots, creates runs, streams state, and exercises the operator loop without any AI provider key.
-- **Provider choice is explicit.** OpenAI, local OpenAI-compatible servers, LM Studio, Hugging Face, Anthropic, and mock cognition all use the same runtime contract.
-- **Runtime state is live.** `/runs/:id/execution/stream` is the authoritative operator stream, `/runs/:id/stream` exposes cognition events, and the web console refreshes snapshots if a stream reconnects.
-- **Production mode is guarded.** `THYMOS_RUNTIME_MODE=production` requires persistent database paths, worker-backed tool execution, explicit CORS origins, and valid concurrency limits.
-- **Verification is scripted.** Run `npm run verify` for the web/docs surface and `cargo test --workspace` from `thymos` for the Rust runtime.
-
-## The Operator Experience
-
-Thymos is meant to feel like an elite coding runtime, not a chatbot.
-
-When you submit a task, the runtime should:
+When you submit a task, the runtime is designed to keep the work moving:
 
 1. Understand the goal.
 2. Plan the next step.
 3. Choose an allowed tool.
 4. Execute the tool for real.
-5. Observe the outcome.
+5. Observe the result.
 6. Recover from failures when possible.
-7. Keep working until the task is actually resolved.
+7. Continue until the task is complete, blocked, or cancelled.
 
-That work is exposed as a shared **execution session** with:
-
-- current status
-- active phase
-- operator-readable execution log
-- commit / rejection / failure counters
-- final answer
-- replayable world state
-
-## The Main Surfaces
-
-### Web Console
-
-The web app gives you a premium operator view of the runtime: live execution session, execution log, raw cognition stream, world replay, and branching.
-
-### CLI
-
-The CLI is for terminal-first users who want to launch, follow, inspect, diff, resume, cancel, and review runs from the shell.
-
-### VS Code Sidebar
-
-The extension gives you a persistent Thymos console inside the editor, plus approval review and diff inspection without losing the shared runtime state.
-
-### System Terminal / Shell
-
-The interactive shell lets users stay in a terminal workflow while still using the same live run model and approval loop.
+Every run exposes a shared **execution session** with status, phase, active
+tool, counters, final answer, execution log, and replayable world state.
 
 ## Core Concepts
 
-### Intent
+| Concept | Meaning |
+| --- | --- |
+| **Intent** | What cognition wants to do next. |
+| **Proposal** | What the runtime has compiled and policy-checked under the current writ. |
+| **Execution** | The real tool invocation and observed result. |
+| **Result** | The recorded outcome: commit, rejection, suspension, delegation, failure, or completion. |
+| **Writ** | A signed capability document with scopes, budget, effect ceiling, and time window. |
+| **Trajectory ledger** | The append-only record of what actually happened during the run. |
+| **Execution session** | The live runtime state shared across CLI, VS Code, terminal, and web surfaces. |
 
-What the model wants to do next.
+## Verify The Stack
 
-### Proposal
+```bash
+# Web app, static export, and docs
+npm run verify
 
-What the runtime has compiled and policy-checked under the current writ.
-
-### Execution
-
-The real tool invocation and observed result.
-
-### Result
-
-The recorded outcome: commit, rejection, suspension, delegation, failure, or completion.
-
-### Writ
-
-A signed capability document that defines what the agent may do, for how long, with what tool scopes and budget.
-
-### Trajectory Ledger
-
-The append-only record of what really happened during the run.
-
-### Execution Session
-
-The live runtime state shared across CLI, VS Code, terminal, and web surfaces.
+# Rust runtime, server, CLI, worker, ledger, marketplace, and tools
+cd thymos
+cargo test --workspace
+```
 
 ## Repository Map
 
-- [`thymos`](thymos) — Rust runtime, server, CLI, worker, and core crates
-- [`src`](src) — Thymos web app and operator console
-- [`docs`](docs) — GitHub Pages documentation site
-- [`wiki`](wiki) — source pages mirrored into the GitHub wiki
+| Path | Purpose |
+| --- | --- |
+| [`thymos`](thymos) | Rust runtime, server, CLI, worker, policy, ledger, marketplace, and core crates. |
+| [`src`](src) | Next.js web app and operator console. |
+| [`docs`](docs) | GitHub Pages documentation site. |
+| [`wiki`](wiki) | Source pages mirrored into the GitHub wiki. |
+| [`thymos/clients/vscode`](thymos/clients/vscode) | VS Code sidebar client. |
 
-## Where To Read Next
+## GitHub Pages Domain
+
+The Pages workflow supports both deployment styles:
+
+- Default repo site: `https://gryszzz.github.io/OpenThymos/`
+- Custom root domain: set the repository variable `PAGES_CUSTOM_DOMAIN` to the hostname, for example `thymos.example.com`
+
+When `PAGES_CUSTOM_DOMAIN` is set, the build removes the `/OpenThymos` base
+path and writes `out/CNAME` into the Pages artifact. Optionally set
+`NEXT_PUBLIC_SITE_URL` to the full canonical URL, such as
+`https://thymos.example.com`.
+
+DNS still has to be configured at the domain provider. For an apex domain use
+GitHub Pages `A`/`AAAA` records; for a subdomain use a `CNAME` record pointing
+to `gryszzz.github.io`.
+
+## Read Next
 
 - [Getting Started](docs/getting-started.md)
 - [Interfaces](docs/interfaces.md)
@@ -223,6 +247,7 @@ The live runtime state shared across CLI, VS Code, terminal, and web surfaces.
 - [Coding Agent](docs/coding-agent.md)
 - [API Reference](docs/api-reference.md)
 - [Providers](docs/providers.md)
+- [Launch Playbook](docs/launch-playbook.md)
 
 ## GitHub Wiki
 
@@ -230,4 +255,5 @@ The project wiki lives at:
 
 `https://github.com/gryszzz/OpenThymos/wiki`
 
-The markdown source for those pages is also kept in [`wiki`](wiki) so the public docs and the wiki can stay aligned.
+The markdown source for those pages is also kept in [`wiki`](wiki) so the
+public docs and the wiki can stay aligned.
