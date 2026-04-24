@@ -5,8 +5,8 @@ description: >-
   terminal, and web surfaces. It executes tasks through Intent, Proposal,
   Execution, and Result with real tools, signed authority, and a live
   observable execution session.
-url: "https://gryszzz.github.io"
-baseurl: "/OpenThymos"
+url: "https://thymos.ai"
+baseurl: ""
 repo: "https://github.com/gryszzz/OpenThymos"
 author: "Exponet Labs"
 

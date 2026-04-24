@@ -25,6 +25,11 @@ concurrency:
   group: "pages"
   cancel-in-progress: true
 
+env:
+  PAGES_CUSTOM_DOMAIN: ${{ vars.PAGES_CUSTOM_DOMAIN || 'thymos.ai' }}
+  NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL || 'https://thymos.ai' }}
+  NEXT_PUBLIC_BASE_PATH: ${{ vars.NEXT_PUBLIC_BASE_PATH }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -44,16 +49,9 @@ jobs:
         run: npm ci
 
       - name: Validate site and docs
-        env:
-          NEXT_PUBLIC_BASE_PATH: ${{ vars.NEXT_PUBLIC_BASE_PATH }}
-          NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL }}
-          PAGES_CUSTOM_DOMAIN: ${{ vars.PAGES_CUSTOM_DOMAIN }}
         run: npm run site:check
 
       - name: Attach Pages custom domain
-        if: ${{ vars.PAGES_CUSTOM_DOMAIN != '' }}
-        env:
-          PAGES_CUSTOM_DOMAIN: ${{ vars.PAGES_CUSTOM_DOMAIN }}
         run: printf '%s\n' "$PAGES_CUSTOM_DOMAIN" > out/CNAME
 
       - name: Upload Pages artifact

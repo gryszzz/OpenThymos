@@ -67,9 +67,9 @@ Preview the static Pages export locally:
 npm run pages:preview
 ```
 
-For a GitHub Pages custom domain, set the repository variable
-`PAGES_CUSTOM_DOMAIN` to your hostname. The workflow will export the site at
-the domain root and attach the required `CNAME` file to the Pages artifact.
+The GitHub Pages workflow exports for `https://thymos.ai/` by default and
+attaches the required `CNAME` file to the Pages artifact. Set the repository
+variable `PAGES_CUSTOM_DOMAIN` only if the production hostname changes.
 
 Use this when you want:
 
