@@ -47,7 +47,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 ```json
-{ "provider": "anthropic", "model": "claude-opus-4-7" }
+{ "provider": "anthropic", "model": "opus" }
 ```
 
 Aliases: `opus`, `sonnet`, `haiku`, `opus-4.6`. Prompt caching, extended

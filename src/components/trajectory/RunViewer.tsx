@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   branchFrom,
   getExecution,
@@ -11,6 +11,7 @@ import {
   type CognitionEvent,
   type ExecutionSession,
   type ResourceDto,
+  type StreamConnectionState,
 } from "@/lib/thymos-api";
 import { ExecutionLog } from "@/components/trajectory/ExecutionLog";
 import { StreamView } from "@/components/trajectory/StreamView";
@@ -35,6 +36,20 @@ const tabLabels: Record<ConsoleTab, string> = {
   world: "World State",
 };
 
+const terminalStatuses = new Set<ExecutionSession["status"]>(["completed", "failed", "cancelled"]);
+
+function sessionRevision(session: ExecutionSession) {
+  return [
+    session.updated_at_ms,
+    session.status,
+    session.phase,
+    session.current_step,
+    session.active_tool ?? "",
+    session.final_answer ?? "",
+    session.log.length,
+  ].join(":");
+}
+
 export function RunViewer({ id }: { id: string }) {
   const [session, setSession] = useState<ExecutionSession | null>(null);
   const [streamEvents, setStreamEvents] = useState<CognitionEvent[]>([]);
@@ -42,32 +57,87 @@ export function RunViewer({ id }: { id: string }) {
   const [tab, setTab] = useState<ConsoleTab>("execution");
   const [scrubSeq, setScrubSeq] = useState<number | null>(null);
   const [branchMsg, setBranchMsg] = useState<string | null>(null);
+  const [executionLink, setExecutionLink] = useState<StreamConnectionState>("connecting");
+  const [streamLink, setStreamLink] = useState<StreamConnectionState>("connecting");
+  const [lastSnapshotAt, setLastSnapshotAt] = useState<number | null>(null);
+  const sessionRevisionRef = useRef<string | null>(null);
+
+  const status = session?.status ?? "running";
+  const isTerminal = session ? terminalStatuses.has(session.status) : false;
+
+  const acceptSnapshot = useCallback((snapshot: ExecutionSession) => {
+    const revision = sessionRevision(snapshot);
+    if (sessionRevisionRef.current === revision) return;
+    sessionRevisionRef.current = revision;
+    setSession(snapshot);
+    setLastSnapshotAt(Date.now());
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    void getExecution(id)
-      .then((snapshot) => {
+    let timer: ReturnType<typeof setInterval> | undefined;
+
+    async function refreshSnapshot() {
+      try {
+        const snapshot = await getExecution(id);
         if (!cancelled) {
-          setSession(snapshot);
+          acceptSnapshot(snapshot);
+          if (terminalStatuses.has(snapshot.status) && timer) {
+            clearInterval(timer);
+            timer = undefined;
+          }
         }
-      })
-      .catch(() => {
-        /* handled by stream fallback */
-      });
+      } catch {
+        if (!cancelled) setExecutionLink("reconnecting");
+      }
+    }
+
+    void refreshSnapshot();
+    timer = setInterval(() => {
+      if (!cancelled) void refreshSnapshot();
+    }, 3000);
+
     return () => {
       cancelled = true;
+      if (timer) clearInterval(timer);
     };
-  }, [id]);
+  }, [id, acceptSnapshot]);
 
   useEffect(() => {
-    const es = subscribeExecution(id, (snapshot) => setSession(snapshot));
+    if (isTerminal) {
+      setExecutionLink("live");
+      return;
+    }
+
+    const es = subscribeExecution(
+      id,
+      (snapshot) => {
+        acceptSnapshot(snapshot);
+      },
+      {
+        onOpen: () => setExecutionLink("live"),
+        onError: () => setExecutionLink("reconnecting"),
+      },
+    );
     return () => es.close();
-  }, [id]);
+  }, [id, isTerminal, acceptSnapshot]);
 
   useEffect(() => {
-    const es = subscribeStream(id, (evt) => setStreamEvents((prev) => [...prev, evt]));
+    if (isTerminal) {
+      setStreamLink("live");
+      return;
+    }
+
+    const es = subscribeStream(
+      id,
+      (evt) => setStreamEvents((prev) => [...prev, evt].slice(-500)),
+      {
+        onOpen: () => setStreamLink("live"),
+        onError: () => setStreamLink("reconnecting"),
+      },
+    );
     return () => es.close();
-  }, [id]);
+  }, [id, isTerminal]);
 
   const fetchWorld = useCallback(async () => {
     try {
@@ -93,7 +163,10 @@ export function RunViewer({ id }: { id: string }) {
     () => session?.log.filter((entry) => entry.commit_id && entry.seq !== undefined) ?? [],
     [session],
   );
-  const maxSeq = commitLogs.reduce((max, entry) => Math.max(max, entry.seq ?? 0), 0);
+  const maxSeq = useMemo(
+    () => commitLogs.reduce((max, entry) => Math.max(max, entry.seq ?? 0), 0),
+    [commitLogs],
+  );
   const currentScrubSeq = scrubSeq ?? maxSeq;
 
   const handleBranch = useCallback(
@@ -108,8 +181,21 @@ export function RunViewer({ id }: { id: string }) {
     [id],
   );
 
-  const status = session?.status ?? "running";
   const palette = statusStyles[status];
+  const liveLabel = isTerminal
+    ? "Session closed"
+    : executionLink === "live"
+      ? "Execution live"
+      : executionLink === "reconnecting"
+        ? "Reconnecting"
+        : "Connecting";
+  const streamLabel = isTerminal
+    ? "Stream closed"
+    : streamLink === "live"
+      ? "Model stream live"
+      : streamLink === "reconnecting"
+        ? "Stream reconnecting"
+        : "Stream connecting";
 
   return (
     <main className="thymos-runtime-shell">
@@ -135,6 +221,10 @@ export function RunViewer({ id }: { id: string }) {
               style={{ background: palette.tone, boxShadow: `0 0 18px ${palette.glow}` }}
             />
             {palette.label}
+          </span>
+          <span className="thymos-live-pill" data-state={isTerminal ? "closed" : executionLink}>
+            <span className="thymos-live-dot" />
+            {liveLabel}
           </span>
           <span className="thymos-eyebrow">Thymos Runtime</span>
           <code className="thymos-console-id">{id}</code>
@@ -182,7 +272,17 @@ export function RunViewer({ id }: { id: string }) {
             title="Execution State"
             body={`Phase: ${session?.phase ?? "system"}\nLast update: ${
               session ? new Date(session.updated_at_ms).toLocaleTimeString() : "--"
+            }\nLive link: ${liveLabel}\nSnapshot: ${
+              lastSnapshotAt ? new Date(lastSnapshotAt).toLocaleTimeString() : "pending"
             }\nTrajectory: ${session?.trajectory_id ? session.trajectory_id.slice(0, 16) : "pending"}`}
+          />
+
+          <SidePanel
+            title="Live Stream"
+            body={`Status: ${streamLabel}\nEvents received: ${streamEvents.length}\nActive tool: ${
+              session?.active_tool ?? "standby"
+            }`}
+            accent={streamLink === "live" && !isTerminal ? "#34d399" : "#fbbf24"}
           />
 
           <SidePanel

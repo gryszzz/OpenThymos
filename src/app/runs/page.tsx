@@ -3,7 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { RunViewer } from "@/components/trajectory/RunViewer";
-import { createRun } from "@/lib/thymos-api";
+import { createRun, type CognitionProvider } from "@/lib/thymos-api";
 
 const suggestedTasks = [
   {
@@ -20,13 +20,60 @@ const suggestedTasks = [
   },
 ];
 
+const providerOptions: Array<{
+  value: CognitionProvider;
+  label: string;
+  help: string;
+  placeholder: string;
+}> = [
+  {
+    value: "mock",
+    label: "Mock",
+    help: "Deterministic, no API key required.",
+    placeholder: "No model needed",
+  },
+  {
+    value: "openai",
+    label: "OpenAI",
+    help: "Use OPENAI_API_KEY or a compatible gateway.",
+    placeholder: "gpt-4o",
+  },
+  {
+    value: "local",
+    label: "Local",
+    help: "Ollama, vLLM, llama.cpp, or custom OpenAI-compatible endpoints.",
+    placeholder: "llama3",
+  },
+  {
+    value: "lmstudio",
+    label: "LM Studio",
+    help: "Local desktop model server.",
+    placeholder: "qwen2.5-coder-32b-instruct",
+  },
+  {
+    value: "huggingface",
+    label: "Hugging Face",
+    help: "Hosted router with HF_TOKEN.",
+    placeholder: "Qwen/Qwen2.5-Coder-32B-Instruct",
+  },
+  {
+    value: "anthropic",
+    label: "Anthropic",
+    help: "Optional hosted frontier provider.",
+    placeholder: "opus",
+  },
+];
+
 export default function RunsPage() {
   const router = useRouter();
   const [runId, setRunId] = useState<string | null>(null);
   const [task, setTask] = useState("");
   const [maxSteps, setMaxSteps] = useState(24);
+  const [provider, setProvider] = useState<CognitionProvider>("mock");
+  const [model, setModel] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const selectedProvider = providerOptions.find((option) => option.value === provider) ?? providerOptions[0];
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -39,10 +86,13 @@ export default function RunsPage() {
     setLoading(true);
     setError(null);
     try {
-      const result = await createRun(task, maxSteps);
+      const result = await createRun(task, maxSteps, {
+        provider,
+        ...(model.trim() ? { model: model.trim() } : {}),
+      });
       router.push(`/runs?id=${encodeURIComponent(result.run_id)}`);
     } catch (err) {
-      setError(String(err));
+      setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
     }
   }
@@ -122,6 +172,36 @@ export default function RunsPage() {
           </div>
 
           <div className="thymos-form-row">
+            <label className="thymos-field thymos-provider-field">
+              <span className="thymos-field-label">Provider</span>
+              <select
+                className="thymos-select"
+                value={provider}
+                onChange={(event) => {
+                  setProvider(event.target.value as CognitionProvider);
+                  setModel("");
+                }}
+              >
+                {providerOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="thymos-field thymos-model-field">
+              <span className="thymos-field-label">Model</span>
+              <input
+                className="thymos-text-input"
+                type="text"
+                value={model}
+                disabled={provider === "mock"}
+                placeholder={selectedProvider.placeholder}
+                onChange={(event) => setModel(event.target.value)}
+              />
+            </label>
+
             <label className="thymos-field">
               <span className="thymos-field-label">Max Steps</span>
               <input
@@ -138,6 +218,8 @@ export default function RunsPage() {
               {loading ? "Launching Runtime" : "Start Thymos Run"}
             </button>
           </div>
+
+          <p className="thymos-provider-note">{selectedProvider.help}</p>
 
           {error ? <p className="thymos-error">{error}</p> : null}
         </form>

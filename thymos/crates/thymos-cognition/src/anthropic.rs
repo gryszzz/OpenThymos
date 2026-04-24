@@ -1,13 +1,13 @@
 //! Anthropic Messages API cognition adapter.
 //!
-//! A stateful `Cognition` implementation that confines Claude to the role of
-//! Proposer: Claude emits `tool_use` content blocks, which this adapter
+//! A stateful `Cognition` implementation that confines the model to the role
+//! of Proposer: it emits `tool_use` content blocks, which this adapter
 //! translates into `Intent`s. Execution, authority, and state mutation remain
 //! with the runtime. Rejections observed on prior turns are surfaced back to
-//! Claude as `tool_result` blocks with `is_error=true`, forming a typed,
+//! the model as `tool_result` blocks with `is_error=true`, forming a typed,
 //! lossless feedback loop.
 //!
-//! This adapter targets Claude Opus 4.7 as the default. Earlier models
+//! This adapter targets Anthropic Opus 4.7 as the default. Earlier models
 //! (Opus 4.6, Sonnet 4.6, Haiku 4.5) remain selectable via `with_model`.
 //!
 //! Capabilities:
@@ -68,7 +68,7 @@ pub struct ThinkingConfig {
     pub budget_tokens: u32,
 }
 
-/// One round of Claude output converted into Thymos types.
+/// One round of Anthropic model output converted into Thymos types.
 pub struct AnthropicCognition {
     client: reqwest::blocking::Client,
     api_key: String,
@@ -80,11 +80,11 @@ pub struct AnthropicCognition {
     max_retries: u32,
     /// Accumulated conversation. Appended on every round.
     messages: Vec<Value>,
-    /// Mapping from the Intent we produced → the Claude tool_use_id that
+    /// Mapping from the Intent we produced → the provider tool_use_id that
     /// sourced it. Used to correlate committed/rejected outcomes back onto
     /// the correct tool_result in the next turn.
     correlations: HashMap<IntentId, String>,
-    /// Tool_use ids ordered as Claude emitted them in the LAST assistant
+    /// Tool_use ids ordered as the provider emitted them in the LAST assistant
     /// turn. Every one of these MUST be answered (the API enforces this);
     /// ids whose corresponding Intent was not submitted get a synthetic
     /// "not executed" tool_result in the next turn.
@@ -333,7 +333,7 @@ impl Cognition for AnthropicCognition {
 
                         let intent = Intent::new(IntentBody {
                             parent_commit: None,
-                            author: format!("claude:{}", self.model),
+                            author: format!("anthropic:{}", self.model),
                             kind: IntentKind::Act,
                             target: name,
                             args: input,
@@ -677,7 +677,7 @@ fn build_tool_results(
         }
     }
 
-    // For every tool_use id Claude emitted last turn, produce a tool_result.
+    // For every tool_use id the provider emitted last turn, produce a tool_result.
     let mut results = Vec::with_capacity(expected_tool_use_ids.len());
     for tool_use_id in expected_tool_use_ids {
         // Find which Intent id maps to this tool_use_id.

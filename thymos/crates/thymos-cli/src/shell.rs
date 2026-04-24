@@ -55,7 +55,7 @@ impl ApprovePolicy {
 impl ShellState {
     fn new() -> Self {
         Self {
-            provider: "anthropic".into(),
+            provider: "mock".into(),
             model: None,
             max_steps: 16,
             scopes: None,

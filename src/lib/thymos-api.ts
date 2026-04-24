@@ -2,6 +2,38 @@
 
 const BASE = process.env.NEXT_PUBLIC_THYMOS_URL ?? "http://localhost:3001";
 
+async function readJson<T>(res: Response, action: string): Promise<T> {
+  const text = await res.text();
+  let body: unknown = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+
+  if (!res.ok) {
+    const payload = body && typeof body === "object" ? body as Record<string, unknown> : null;
+    const message =
+      typeof payload?.error === "string"
+        ? payload.error
+        : typeof payload?.message === "string"
+          ? payload.message
+          : text || res.statusText;
+    throw new Error(`${action} failed (${res.status}): ${message}`);
+  }
+
+  return body as T;
+}
+
+export type StreamConnectionState = "connecting" | "live" | "reconnecting";
+
+export interface StreamCallbacks {
+  onOpen?: () => void;
+  onError?: () => void;
+}
+
 export interface RunRecord {
   trajectory_id: string;
   task: string;
@@ -104,7 +136,7 @@ export type CognitionProvider =
 
 export interface CognitionConfig {
   provider: CognitionProvider;
-  /** Model name override (e.g. "claude-sonnet-4-5-20250514", "gpt-4o-mini", "llama3"). */
+  /** Model name override (e.g. "opus", "gpt-4o-mini", "llama3"). */
   model?: string;
   /** Max tokens for the response. */
   max_tokens?: number;
@@ -118,44 +150,47 @@ export async function createRun(
   maxSteps = 16,
   cognition?: CognitionConfig,
 ) {
+  const safeMaxSteps = Number.isFinite(maxSteps)
+    ? Math.min(100, Math.max(1, Math.trunc(maxSteps)))
+    : 16;
   const res = await fetch(`${BASE}/runs`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       task,
-      max_steps: maxSteps,
+      max_steps: safeMaxSteps,
       ...(cognition ? { cognition } : {}),
     }),
   });
-  return res.json() as Promise<{ run_id: string; task: string; status: string }>;
+  return readJson<{ run_id: string; task: string; status: string }>(res, "create run");
 }
 
 /** GET /runs/:id — get run status. */
 export async function getRun(id: string) {
   const res = await fetch(`${BASE}/runs/${id}`);
-  return res.json() as Promise<RunRecord>;
+  return readJson<RunRecord>(res, "get run");
 }
 
 /** GET /runs/:id/execution — get unified execution session state. */
 export async function getExecution(id: string) {
   const res = await fetch(`${BASE}/runs/${id}/execution`);
-  return res.json() as Promise<ExecutionSession>;
+  return readJson<ExecutionSession>(res, "get execution");
 }
 
 /** GET /runs/:id/world — get world projection. */
 export async function getWorld(id: string) {
   const res = await fetch(`${BASE}/runs/${id}/world`);
-  return res.json() as Promise<WorldDto>;
+  return readJson<WorldDto>(res, "get world");
 }
 
 /** GET /runs/:id/world/at?seq=N — replay world projection up to commit seq N. */
 export async function getWorldAt(id: string, seq: number) {
   const res = await fetch(`${BASE}/runs/${id}/world/at?seq=${seq}`);
-  return res.json() as Promise<WorldDto & {
+  return readJson<WorldDto & {
     seq: number;
     commits_replayed: number;
     head_commit: string | null;
-  }>;
+  }>(res, "get world replay");
 }
 
 /** POST /runs/:id/branch — create a shadow (counterfactual) branch from a commit. */
@@ -165,31 +200,28 @@ export async function branchFrom(id: string, commitId: string, note?: string) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ commit_id: commitId, note }),
   });
-  if (!res.ok) throw new Error(`branch failed: ${res.status}`);
-  return res.json() as Promise<{
+  return readJson<{
     branch_trajectory_id: string;
     source_trajectory_id: string;
     source_commit_id: string;
     note: string;
-  }>;
+  }>(res, "create branch");
 }
 
 /** Subscribe to SSE trajectory entry events. */
 export function subscribeEntries(
   runId: string,
   onEntry: (entry: EntryDto) => void,
-  onDone?: () => void,
+  callbacks?: StreamCallbacks,
 ): EventSource {
   const es = new EventSource(`${BASE}/runs/${runId}/events`);
+  es.onopen = () => callbacks?.onOpen?.();
   es.onmessage = (e) => {
     try {
       onEntry(JSON.parse(e.data));
     } catch { /* skip */ }
   };
-  es.onerror = () => {
-    es.close();
-    onDone?.();
-  };
+  es.onerror = () => callbacks?.onError?.();
   return es;
 }
 
@@ -197,9 +229,10 @@ export function subscribeEntries(
 export function subscribeStream(
   runId: string,
   onEvent: (evt: CognitionEvent) => void,
-  onDone?: () => void,
+  callbacks?: StreamCallbacks,
 ): EventSource {
   const es = new EventSource(`${BASE}/runs/${runId}/stream`);
+  es.onopen = () => callbacks?.onOpen?.();
 
   for (const eventType of [
     "token",
@@ -216,10 +249,7 @@ export function subscribeStream(
     });
   }
 
-  es.onerror = () => {
-    es.close();
-    onDone?.();
-  };
+  es.onerror = () => callbacks?.onError?.();
   return es;
 }
 
@@ -227,9 +257,10 @@ export function subscribeStream(
 export function subscribeExecution(
   runId: string,
   onSnapshot: (session: ExecutionSession) => void,
-  onDone?: () => void,
+  callbacks?: StreamCallbacks,
 ): EventSource {
   const es = new EventSource(`${BASE}/runs/${runId}/execution/stream`);
+  es.onopen = () => callbacks?.onOpen?.();
   es.addEventListener("snapshot", (e: MessageEvent) => {
     try {
       onSnapshot(JSON.parse(e.data));
@@ -237,9 +268,6 @@ export function subscribeExecution(
       /* skip */
     }
   });
-  es.onerror = () => {
-    es.close();
-    onDone?.();
-  };
+  es.onerror = () => callbacks?.onError?.();
   return es;
 }

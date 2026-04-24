@@ -4,7 +4,7 @@
 
 # THYMOS
 
-**Unified AI execution runtime for coding agents.**
+**Provider-neutral execution framework for agentic software.**
 
 *Intent -> Proposal -> Execution -> Result*
 
@@ -18,7 +18,7 @@
 
 Thymos is not just a prompt wrapper or a tool-calling shell.
 
-It is a **shared execution runtime** for agentic work. A user can start a task from the CLI, a VS Code sidebar, a web console, or a terminal session and attach all of those surfaces to the **same live run**.
+It is a **shared execution framework** for agentic work. A user can start a task from the CLI, a VS Code sidebar, a web console, or a terminal session and attach all of those surfaces to the **same live run**.
 
 Each run moves through a structured flow:
 
@@ -26,9 +26,14 @@ Each run moves through a structured flow:
 
 The model proposes work. The runtime decides whether that work is allowed under a signed writ, executes real tools, observes results, records everything in a durable ledger, and keeps going until the task is complete, blocked, or explicitly cancelled.
 
+The core idea is simple:
+
+`Model output becomes governed execution, not direct authority.`
+
 ## What Makes It Different
 
 - **One runtime, many surfaces.** CLI, VS Code, terminal, and web console reflect the same backend run state.
+- **Live by default.** The console consumes execution-session SSE snapshots, cognition streams, and periodic snapshot refreshes so users can watch real work while it happens.
 - **Agentic by design.** Thymos plans, executes, observes, retries, and adapts instead of stopping after every tool call.
 - **Real execution only.** File reads, patches, tests, shell calls, approvals, failures, and recoveries are all real runtime events.
 - **Fully observable.** Every run has a live execution session, clear status, and replayable execution log.
@@ -107,11 +112,30 @@ OPENAI_BASE_URL=http://localhost:1234/v1 OPENAI_API_KEY=local cargo run -p thymo
 For production-shaped deployments, also configure:
 
 ```bash
+THYMOS_RUNTIME_MODE=production
 THYMOS_BIND_ADDR=0.0.0.0:3001
+THYMOS_LEDGER_PATH=/var/lib/thymos/thymos-ledger.db
+THYMOS_DB_PATH=/var/lib/thymos/thymos-runs.db
+THYMOS_GATEWAY_DB_PATH=/var/lib/thymos/thymos-gateway.db
+THYMOS_MARKETPLACE_DB_PATH=/var/lib/thymos/thymos-marketplace.db
 THYMOS_ALLOWED_ORIGINS=https://your-console.example.com
+THYMOS_TOOL_FABRIC=worker
+THYMOS_WORKER_BIN=/usr/local/bin/thymos-worker
 THYMOS_MAX_CONCURRENT_RUNS_GLOBAL=100
 THYMOS_MAX_CONCURRENT_RUNS_PER_TENANT=20
 ```
+
+In production mode the server validates these settings at startup and refuses unsafe defaults such as in-process shell/http execution or missing browser origin policy.
+
+## Production Readiness
+
+Thymos is built to be usable without a hosted model and configurable for real deployments:
+
+- **Default cognition is `mock`.** The framework boots, creates runs, streams state, and exercises the operator loop without any AI provider key.
+- **Provider choice is explicit.** OpenAI, local OpenAI-compatible servers, LM Studio, Hugging Face, Anthropic, and mock cognition all use the same runtime contract.
+- **Runtime state is live.** `/runs/:id/execution/stream` is the authoritative operator stream, `/runs/:id/stream` exposes cognition events, and the web console refreshes snapshots if a stream reconnects.
+- **Production mode is guarded.** `THYMOS_RUNTIME_MODE=production` requires persistent database paths, worker-backed tool execution, explicit CORS origins, and valid concurrency limits.
+- **Verification is scripted.** Run `npm run verify` for the web/docs surface and `cargo test --workspace` from `thymos` for the Rust runtime.
 
 ## The Operator Experience
 

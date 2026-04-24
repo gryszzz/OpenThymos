@@ -201,9 +201,9 @@ pub enum CognitionProvider {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CognitionConfig {
     pub provider: CognitionProvider,
-    /// Model name override. Accepts full ids (`claude-opus-4-7`,
-    /// `claude-sonnet-4-6`, `claude-haiku-4-5`, `gpt-4o-mini`, `llama3`) or
-    /// aliases (`opus`, `sonnet`, `haiku`, `opus-4.6`).
+    /// Model name override. Accepts Anthropic aliases (`opus`, `sonnet`,
+    /// `haiku`, `opus-4.6`) plus provider-native ids such as `gpt-4o-mini`
+    /// or `llama3`.
     #[serde(default)]
     pub model: Option<String>,
     /// Max tokens for the response.
@@ -230,7 +230,7 @@ fn default_cache_prefix() -> bool {
 impl Default for CognitionConfig {
     fn default() -> Self {
         CognitionConfig {
-            provider: CognitionProvider::Anthropic,
+            provider: CognitionProvider::Mock,
             model: None,
             max_tokens: None,
             base_url: None,

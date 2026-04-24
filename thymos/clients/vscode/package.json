@@ -82,7 +82,7 @@
         },
         "thymos.provider": {
           "type": "string",
-          "default": "anthropic",
+          "default": "mock",
           "description": "Default cognition provider."
         },
         "thymos.preset": {

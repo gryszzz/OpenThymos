@@ -51,7 +51,7 @@ function getConfig(): Config {
     url: c.get<string>("url", "http://localhost:3001"),
     apiKey: c.get<string>("apiKey", ""),
     cliPath: c.get<string>("cliPath", "thymos"),
-    provider: c.get<string>("provider", "anthropic"),
+    provider: c.get<string>("provider", "mock"),
     preset: c.get<"default" | "code">("preset", "code"),
     openPanelOnStartup: c.get<boolean>("openPanelOnStartup", true),
   };

@@ -55,9 +55,9 @@ fn adapter_builder_exposes_all_new_knobs() {
 }
 
 #[test]
-fn cognition_config_default_is_anthropic_with_cache_on() {
+fn cognition_config_default_is_mock_with_cache_on() {
     let cfg = CognitionConfig::default();
-    assert_eq!(cfg.provider, CognitionProvider::Anthropic);
+    assert_eq!(cfg.provider, CognitionProvider::Mock);
     assert!(cfg.cache_prefix, "cache_prefix must default to true");
     assert!(cfg.thinking_budget_tokens.is_none());
     assert!(cfg.model.is_none());

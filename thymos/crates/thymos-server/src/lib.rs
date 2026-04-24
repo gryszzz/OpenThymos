@@ -307,7 +307,7 @@ pub struct CreateRunRequest {
     pub max_steps: u32,
     #[serde(default)]
     pub tool_scopes: Vec<String>,
-    /// Cognition provider config. Defaults to Anthropic if omitted.
+    /// Cognition provider config. Defaults to mock if omitted.
     #[serde(default)]
     pub cognition: Option<CognitionConfig>,
 }
@@ -1042,7 +1042,7 @@ async fn create_run(
     let task2 = task.clone();
 
     tokio::spawn(async move {
-        // Build cognition from per-run config (or default to Anthropic).
+        // Build cognition from per-run config (or default to mock).
         let config = req.cognition.unwrap_or_default();
         // `build_cognition` may call `reqwest::blocking::ClientBuilder::build()`,
         // which internally creates and drops a current-thread tokio runtime.

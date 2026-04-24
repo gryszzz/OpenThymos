@@ -8,6 +8,7 @@
     "pages:preview": "npm run build && python3 -m http.server 4173 -d out",
     "docs:check": "node scripts/check-docs.mjs",
     "site:check": "npm run build && npm run docs:check",
+    "verify": "npm run typecheck && npm run build && npm run docs:check",
     "start": "next start",
     "typecheck": "tsc --noEmit --project tsconfig.typecheck.json"
   },

@@ -3,10 +3,10 @@ const githubUrl = "https://github.com/gryszzz/OpenThymos";
 
 export const siteConfig = {
   name: process.env.NEXT_PUBLIC_APP_NAME || "OpenThymos",
-  tagline: "Models propose. OpenThymos governs execution.",
-  headline: "Governed execution for AI systems.",
+  tagline: "A provider-neutral execution framework for agentic software.",
+  headline: "Governed execution for AI agents.",
   subheadline:
-    "A model-agnostic runtime where typed intents, signed writs, policy gates, and a replayable trajectory ledger keep machine action bounded and auditable.",
+    "OpenThymos turns model output into typed intents, checks them against signed authority, executes approved tools, and records every outcome in a replayable ledger.",
   basePath,
   supportEmail: "team@thymos.ai",
   githubUrl,

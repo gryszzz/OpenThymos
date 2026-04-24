@@ -78,12 +78,17 @@ Example fields:
 SSE stream of execution-session snapshots.
 
 This is the best stream to consume if you want operator-facing runtime truth.
+Clients should keep this connection open and allow browser/EventSource reconnects.
+For production UIs, pair it with periodic `GET /runs/:id/execution` refreshes so
+the screen remains current through proxy restarts, network blips, or tab sleep.
 
 ### GET /runs/:id/stream
 
 SSE stream of raw cognition events such as tokens and tool-use deltas.
 
 This is useful for model-side visibility, but it is not the authoritative execution state.
+Use the execution-session stream for user-facing status, counters, active tool,
+approvals, and final outcome.
 
 ### GET /runs/:id/events
 

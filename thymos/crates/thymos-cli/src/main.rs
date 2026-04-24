@@ -39,7 +39,7 @@ enum Commands {
         #[arg(long, default_value = "16")]
         max_steps: u32,
         /// Cognition provider: anthropic, openai, local, lmstudio, huggingface, mock.
-        #[arg(long, default_value = "anthropic")]
+        #[arg(long, default_value = "mock")]
         provider: String,
         /// Model override.
         #[arg(long)]

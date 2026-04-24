@@ -1,8 +1,35 @@
 "use client";
 
+import { useMemo } from "react";
 import type { CognitionEvent } from "@/lib/thymos-api";
 
 export function StreamView({ events }: { events: CognitionEvent[] }) {
+  const { text, toolUses } = useMemo(() => {
+    let nextText = "";
+    const nextToolUses: { tool: string; id: string }[] = [];
+
+    for (const evt of events) {
+      switch (evt.type) {
+        case "token":
+          nextText += evt.text ?? "";
+          break;
+        case "tool_use_start":
+          nextToolUses.push({ tool: evt.tool ?? "?", id: evt.id ?? "" });
+          break;
+        case "turn_complete":
+          if (evt.final_answer) {
+            nextText += `\n\n--- Final Answer ---\n${evt.final_answer}`;
+          }
+          break;
+        case "error":
+          nextText += `\n[ERROR] ${evt.message}`;
+          break;
+      }
+    }
+
+    return { text: nextText, toolUses: nextToolUses };
+  }, [events]);
+
   if (events.length === 0) {
     return (
       <div className="thymos-empty-state">
@@ -10,29 +37,6 @@ export function StreamView({ events }: { events: CognitionEvent[] }) {
         <p>Waiting for cognition stream...</p>
       </div>
     );
-  }
-
-  // Reconstruct the streaming text from token events.
-  let text = "";
-  const toolUses: { tool: string; id: string }[] = [];
-
-  for (const evt of events) {
-    switch (evt.type) {
-      case "token":
-        text += evt.text ?? "";
-        break;
-      case "tool_use_start":
-        toolUses.push({ tool: evt.tool ?? "?", id: evt.id ?? "" });
-        break;
-      case "turn_complete":
-        if (evt.final_answer) {
-          text += `\n\n--- Final Answer ---\n${evt.final_answer}`;
-        }
-        break;
-      case "error":
-        text += `\n[ERROR] ${evt.message}`;
-        break;
-    }
   }
 
   return (

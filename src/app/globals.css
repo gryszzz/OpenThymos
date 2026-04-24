@@ -1150,7 +1150,9 @@ code {
 }
 
 .thymos-textarea,
-.thymos-number-input {
+.thymos-number-input,
+.thymos-text-input,
+.thymos-select {
   width: 100%;
   border-radius: 18px;
   border: 1px solid rgba(146, 163, 184, 0.18);
@@ -1171,8 +1173,39 @@ code {
   padding: 10px 14px;
 }
 
+.thymos-provider-field {
+  min-width: 160px;
+}
+
+.thymos-model-field {
+  flex: 1 1 260px;
+}
+
+.thymos-text-input,
+.thymos-select {
+  min-height: 46px;
+  padding: 10px 14px;
+  line-height: 1.35;
+}
+
+.thymos-select {
+  appearance: none;
+  padding-right: 42px;
+  background:
+    linear-gradient(45deg, transparent 50%, #c9d4e1 50%) calc(100% - 20px) 18px / 6px 6px no-repeat,
+    linear-gradient(135deg, #c9d4e1 50%, transparent 50%) calc(100% - 14px) 18px / 6px 6px no-repeat,
+    rgba(255, 255, 255, 0.04);
+}
+
+.thymos-text-input:disabled {
+  color: rgba(201, 212, 225, 0.58);
+  cursor: not-allowed;
+}
+
 .thymos-textarea:focus,
-.thymos-number-input:focus {
+.thymos-number-input:focus,
+.thymos-text-input:focus,
+.thymos-select:focus {
   outline: none;
   border-color: rgba(119, 169, 255, 0.34);
   box-shadow: 0 0 0 3px rgba(119, 169, 255, 0.12);
@@ -1184,6 +1217,13 @@ code {
   flex-wrap: wrap;
   gap: 14px;
   align-items: end;
+}
+
+.thymos-provider-note {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
 }
 
 .thymos-button,
@@ -1324,6 +1364,53 @@ code {
   width: 8px;
   height: 8px;
   border-radius: 999px;
+}
+
+.thymos-live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(52, 211, 153, 0.28);
+  background: rgba(52, 211, 153, 0.08);
+  color: #d5ffe9;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.thymos-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #34d399;
+  box-shadow: 0 0 16px rgba(52, 211, 153, 0.56);
+}
+
+.thymos-live-pill[data-state="connecting"],
+.thymos-live-pill[data-state="reconnecting"] {
+  border-color: rgba(251, 191, 36, 0.28);
+  background: rgba(251, 191, 36, 0.08);
+  color: #ffe7bb;
+}
+
+.thymos-live-pill[data-state="connecting"] .thymos-live-dot,
+.thymos-live-pill[data-state="reconnecting"] .thymos-live-dot {
+  background: #fbbf24;
+  box-shadow: 0 0 16px rgba(251, 191, 36, 0.52);
+}
+
+.thymos-live-pill[data-state="closed"] {
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(148, 163, 184, 0.08);
+  color: rgba(201, 212, 225, 0.76);
+}
+
+.thymos-live-pill[data-state="closed"] .thymos-live-dot {
+  background: #94a3b8;
+  box-shadow: none;
 }
 
 .thymos-console-id {
@@ -1706,7 +1793,9 @@ code {
     max-width: none;
   }
 
-  .thymos-number-input {
+  .thymos-number-input,
+  .thymos-provider-field,
+  .thymos-model-field {
     width: 100%;
   }
 }

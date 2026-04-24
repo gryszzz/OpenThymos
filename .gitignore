@@ -6,5 +6,6 @@ out
 .DS_Store
 npm-debug.log*
 target/
-tsconfig.tsbuildinfo
-.claude/
+*.tsbuildinfo
+*.db-shm
+*.db-wal

@@ -56,7 +56,7 @@ Ideal first users:
 - platform teams standardizing agent execution
 - security-conscious engineering orgs
 - enterprises wanting local or mixed-model operation
-- teams already using Claude Code, Codex, Cursor, or internal agents
+- teams already using Codex, Cursor, Windsurf, or internal agents
 
 First promise:
 
