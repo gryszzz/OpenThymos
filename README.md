@@ -12,7 +12,7 @@ Thymos turns model output into typed, policy-checked, ledgered execution.<br />
 One runtime. Many surfaces. Real tools. Replayable history.
 
 <p>
-  <a href="https://thymos.ai/"><strong>Website</strong></a>
+  <a href="https://gryszzz.github.io/OpenThymos/"><strong>Website</strong></a>
   ·
   <a href="docs/getting-started.md"><strong>Get Started</strong></a>
   ·
@@ -227,12 +227,13 @@ cargo test --workspace
 
 The Pages workflow supports both deployment styles:
 
-- Production site: `https://thymos.ai/`
-- Override domain: set the repository variable `PAGES_CUSTOM_DOMAIN` to a different hostname
+- Default repo site: `https://gryszzz.github.io/OpenThymos/`
+- Custom root domain: set the repository variable `PAGES_CUSTOM_DOMAIN` to the hostname, for example `thymos.example.com`
 
-The Pages workflow builds for the custom-domain root by default and writes
-`out/CNAME` into the Pages artifact. Optionally set `NEXT_PUBLIC_SITE_URL` to a
-different full canonical URL if the production domain changes.
+When `PAGES_CUSTOM_DOMAIN` is set, the build removes the `/OpenThymos` base
+path and writes `out/CNAME` into the Pages artifact. Optionally set
+`NEXT_PUBLIC_SITE_URL` to the full canonical URL, such as
+`https://thymos.example.com`.
 
 DNS still has to be configured at the domain provider. For an apex domain use
 GitHub Pages `A`/`AAAA` records; for a subdomain use a `CNAME` record pointing
