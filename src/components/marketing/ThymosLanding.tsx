@@ -579,7 +579,10 @@ export function ThymosLanding() {
           <div className="thymos-footer-copy">
             <strong>OpenThymos is governed execution for AI systems.</strong>
             <span>
-              An {siteConfig.org} project · Apache-2.0 · {siteConfig.supportEmail}
+              An {siteConfig.org} project · Apache-2.0 ·{" "}
+              <a href={siteConfig.issuesUrl} target="_blank" rel="noreferrer">
+                GitHub Issues
+              </a>
             </span>
           </div>
         </footer>

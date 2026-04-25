@@ -67,9 +67,7 @@ Preview the static Pages export locally:
 npm run pages:preview
 ```
 
-For a GitHub Pages custom domain, set the repository variable
-`PAGES_CUSTOM_DOMAIN` to your hostname. The workflow will export the site at
-the domain root and attach the required `CNAME` file to the Pages artifact.
+The public site is served from `https://gryszzz.github.io/OpenThymos/`.
 
 Use this when you want:
 

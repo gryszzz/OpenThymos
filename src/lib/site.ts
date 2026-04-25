@@ -15,11 +15,6 @@ function normalizeSiteUrl(value: string | undefined): string {
     return trimmed;
   }
 
-  const customDomain = process.env.PAGES_CUSTOM_DOMAIN?.trim().replace(/\/+$/, "");
-  if (customDomain) {
-    return `https://${customDomain.replace(/^https?:\/\//, "")}`;
-  }
-
   return "https://gryszzz.github.io/OpenThymos";
 }
 
@@ -34,9 +29,9 @@ export const siteConfig = {
     "OpenThymos turns model output into typed intents, checks them against signed authority, executes approved tools, and records every outcome in a replayable ledger.",
   basePath,
   siteUrl: normalizeSiteUrl(process.env.NEXT_PUBLIC_SITE_URL),
-  supportEmail: "team@thymos.ai",
   githubUrl,
   docsUrl: `${githubUrl}/tree/main/docs`,
+  issuesUrl: `${githubUrl}/issues`,
   readmeUrl: `${githubUrl}#readme`,
   wikiUrl: `${githubUrl}/wiki`,
   org: "Exponet Labs",
