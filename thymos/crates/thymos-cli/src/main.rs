@@ -11,6 +11,7 @@
 
 use clap::{Parser, Subcommand};
 use serde_json::Value;
+use std::process::Command as ProcessCommand;
 
 mod shell;
 
@@ -70,6 +71,10 @@ enum Commands {
     Usage,
     /// Health check.
     Health,
+    /// Branded local + runtime readiness dashboard.
+    Doctor,
+    /// Show terminal configuration, env vars, and next commands.
+    Config,
     /// Approve or deny a pending proposal.
     Approve {
         /// Run ID.
@@ -163,6 +168,8 @@ async fn main() {
         }
         Commands::Usage => cmd_usage(&client, &cli.url, cli.api_key.as_deref()).await,
         Commands::Health => cmd_health(&client, &cli.url).await,
+        Commands::Doctor => cmd_doctor(&client, &cli.url, cli.api_key.as_deref()).await,
+        Commands::Config => cmd_config(&cli.url, cli.api_key.as_deref()),
         Commands::Approve {
             run_id,
             channel,
@@ -187,15 +194,17 @@ async fn main() {
                 status,
                 limit,
                 offset,
-            } => cmd_runs_ls(
-                &client,
-                &cli.url,
-                cli.api_key.as_deref(),
-                status.as_deref(),
-                limit,
-                offset,
-            )
-            .await,
+            } => {
+                cmd_runs_ls(
+                    &client,
+                    &cli.url,
+                    cli.api_key.as_deref(),
+                    status.as_deref(),
+                    limit,
+                    offset,
+                )
+                .await
+            }
             RunsAction::Show { run_id } => {
                 cmd_runs_show(&client, &cli.url, cli.api_key.as_deref(), &run_id).await
             }
@@ -209,6 +218,76 @@ async fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+fn color_enabled() -> bool {
+    std::env::var_os("NO_COLOR").is_none()
+        && std::env::var("TERM")
+            .map(|term| term != "dumb")
+            .unwrap_or(true)
+}
+
+fn paint(code: &str, text: impl AsRef<str>) -> String {
+    if color_enabled() {
+        format!("\x1b[{code}m{}\x1b[0m", text.as_ref())
+    } else {
+        text.as_ref().to_string()
+    }
+}
+
+fn brand_banner() {
+    println!(
+        "{}",
+        paint(
+            "38;2;119;169;255;1",
+            r#"
+  _______ _                              
+ |__   __| |                             
+    | |  | |__  _   _ _ __ ___   ___  ___
+    | |  | '_ \| | | | '_ ` _ \ / _ \/ __|
+    | |  | | | | |_| | | | | | | (_) \__ \
+    |_|  |_| |_|\__, |_| |_| |_|\___/|___/
+                 __/ |                    
+                |___/   governed runtime
+"#
+        )
+    );
+}
+
+fn status_line(label: &str, ok: bool, detail: impl AsRef<str>) {
+    let marker = if ok {
+        paint("38;2;52;211;153;1", "OK ")
+    } else {
+        paint("38;2;251;191;36;1", "CHK")
+    };
+    println!("{marker}  {label:<24} {}", detail.as_ref());
+}
+
+fn mask_secret(value: Option<&str>) -> String {
+    match value {
+        Some(v) if v.len() > 8 => format!("{}...{}", &v[..4], &v[v.len() - 4..]),
+        Some(_) => "(set)".into(),
+        None => "(not set)".into(),
+    }
+}
+
+fn command_version(command: &str) -> Option<String> {
+    ProcessCommand::new(command)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                Some(
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .next()?
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        })
 }
 
 pub(crate) fn auth_headers(api_key: Option<&str>) -> Vec<(String, String)> {
@@ -487,6 +566,144 @@ pub(crate) async fn cmd_health(client: &reqwest::Client, url: &str) -> Result<()
     Ok(())
 }
 
+pub(crate) async fn cmd_doctor(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+) -> Result<(), String> {
+    brand_banner();
+    println!("{}", paint("1", "Thymos Terminal Doctor"));
+    println!("endpoint: {url}");
+    println!();
+
+    status_line("thymos cli", true, env!("CARGO_PKG_VERSION"));
+    status_line("api key", api_key.is_some(), mask_secret(api_key));
+
+    for command in ["cargo", "node", "npm", "git"] {
+        match command_version(command) {
+            Some(version) => status_line(command, true, version),
+            None => status_line(command, false, "not found on PATH"),
+        }
+    }
+
+    println!();
+    match client.get(format!("{url}/health")).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            status_line(
+                "runtime health",
+                status.is_success(),
+                format!(
+                    "{} {}",
+                    status.as_u16(),
+                    body["mode"].as_str().unwrap_or("unknown mode")
+                ),
+            );
+        }
+        Err(err) => status_line("runtime health", false, format!("offline: {err}")),
+    }
+
+    match client.get(format!("{url}/ready")).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            let checks = body["checks"]
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .map(|(key, value)| {
+                            format!(
+                                "{key}={}",
+                                if value.as_bool().unwrap_or(false) {
+                                    "ok"
+                                } else {
+                                    "wait"
+                                }
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_else(|| "no checks".into());
+            status_line("runtime ready", status.is_success(), checks);
+        }
+        Err(err) => status_line("runtime ready", false, format!("offline: {err}")),
+    }
+
+    println!();
+    status_line(
+        "OPENAI_API_KEY",
+        std::env::var_os("OPENAI_API_KEY").is_some(),
+        mask_secret(std::env::var("OPENAI_API_KEY").ok().as_deref()),
+    );
+    status_line(
+        "ANTHROPIC_API_KEY",
+        std::env::var_os("ANTHROPIC_API_KEY").is_some(),
+        mask_secret(std::env::var("ANTHROPIC_API_KEY").ok().as_deref()),
+    );
+    status_line(
+        "HF_TOKEN",
+        std::env::var_os("HF_TOKEN").is_some(),
+        mask_secret(std::env::var("HF_TOKEN").ok().as_deref()),
+    );
+    status_line(
+        "OPENAI_BASE_URL",
+        std::env::var_os("OPENAI_BASE_URL").is_some(),
+        std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "(not set)".into()),
+    );
+
+    println!();
+    println!("{}", paint("38;2;119;169;255;1", "Next moves"));
+    println!("  thymos config");
+    println!("  thymos shell");
+    println!("  thymos run \"Inspect this repo and explain the runtime\" --provider mock --follow");
+    Ok(())
+}
+
+pub(crate) fn cmd_config(url: &str, api_key: Option<&str>) -> Result<(), String> {
+    brand_banner();
+    println!("{}", paint("1", "Terminal Configuration"));
+    println!();
+    let env_url = std::env::var("THYMOS_URL").ok();
+    let installed_thymos = command_version("thymos");
+    status_line("endpoint", true, url);
+    status_line(
+        "THYMOS_URL",
+        env_url.is_some(),
+        env_url.unwrap_or_else(|| format!("defaulting to {url}")),
+    );
+    status_line("THYMOS_API_KEY", api_key.is_some(), mask_secret(api_key));
+    status_line(
+        "config file",
+        thymos_config_path().is_some(),
+        thymos_config_path().unwrap_or_else(|| "~/.config/thymos/thymos.env (not found)".into()),
+    );
+    status_line(
+        "installed thymos",
+        installed_thymos.is_some(),
+        installed_thymos.unwrap_or_else(|| "run scripts/install.sh".into()),
+    );
+    println!();
+    println!("{}", paint("38;2;119;169;255;1", "Clean terminal workflow"));
+    println!("  1. thymos doctor");
+    println!("  2. thymos shell");
+    println!("  3. set preset code");
+    println!("  4. set workspace .");
+    println!("  5. auto \"Inspect the repo, improve one small thing, and verify it\"");
+    Ok(())
+}
+
+fn thymos_config_path() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = format!("{home}/.config/thymos/thymos.env");
+    if std::path::Path::new(&path).exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 pub(crate) async fn cmd_approve(
     client: &reqwest::Client,
     url: &str,
@@ -533,10 +750,7 @@ pub(crate) async fn cmd_runs_ls(
         println!("(no runs)");
         return Ok(());
     }
-    println!(
-        "{:<14}  {:<10}  {}",
-        "RUN ID", "STATUS", "TASK"
-    );
+    println!("{:<14}  {:<10}  {}", "RUN ID", "STATUS", "TASK");
     for r in &runs {
         let id = r["run_id"].as_str().unwrap_or("?");
         let st = r["status"].as_str().unwrap_or("?");

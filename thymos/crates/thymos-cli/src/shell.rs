@@ -16,6 +16,12 @@ use crate::{
     cmd_status, cmd_stream, cmd_usage, cmd_world, json_body_or_error, start_run,
 };
 
+const BLUE: &str = "\x1b[38;2;119;169;255m";
+const GREEN: &str = "\x1b[38;2;52;211;153m";
+const DIM: &str = "\x1b[2m";
+const BOLD: &str = "\x1b[1m";
+const RESET: &str = "\x1b[0m";
+
 /// Persistent defaults carried across commands within one shell session.
 struct ShellState {
     provider: String,
@@ -109,10 +115,7 @@ async fn run_interactive(
         let _ = rl.load_history(path);
     }
 
-    println!("Thymos shell — shared execution runtime");
-    println!("endpoint: {}", url);
-    println!("mode: intent -> proposal -> execution -> result");
-    println!("type `help` for commands, `exit` to leave.");
+    print_shell_banner(url);
 
     loop {
         match rl.readline("thymos> ") {
@@ -139,6 +142,45 @@ async fn run_interactive(
         let _ = rl.save_history(path);
     }
     Ok(())
+}
+
+fn shell_color_enabled() -> bool {
+    std::env::var_os("NO_COLOR").is_none()
+        && std::env::var("TERM")
+            .map(|term| term != "dumb")
+            .unwrap_or(true)
+}
+
+fn c(code: &str) -> &str {
+    if shell_color_enabled() {
+        code
+    } else {
+        ""
+    }
+}
+
+fn print_shell_banner(url: &str) {
+    println!(
+        "{}{}THYMOS SHELL{}  {}shared execution runtime{}",
+        c(BLUE),
+        c(BOLD),
+        c(RESET),
+        c(DIM),
+        c(RESET)
+    );
+    println!("{}endpoint{}  {}", c(DIM), c(RESET), url);
+    println!(
+        "{}flow{}      intent -> proposal -> execution -> result",
+        c(DIM),
+        c(RESET)
+    );
+    println!(
+        "{}quick{}     set preset code | set workspace . | auto \"verify the repo\"",
+        c(GREEN),
+        c(RESET)
+    );
+    println!("type `help` for commands, `show` for config, `exit` to leave.");
+    println!();
 }
 
 async fn run_piped(

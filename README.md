@@ -88,6 +88,23 @@ The core idea is simple:
 
 ## Launch In 5 Minutes
 
+### 0. Install the terminal tools
+
+```bash
+./scripts/install.sh
+export PATH="$HOME/.local/bin:$PATH"
+source "$HOME/.config/thymos/thymos.env"
+thymos doctor
+```
+
+The installer builds and installs:
+
+| Binary | Purpose |
+| --- | --- |
+| `thymos` | Branded CLI, doctor dashboard, interactive shell, run controls. |
+| `thymos-server` | Local runtime server. |
+| `thymos-worker` | Worker process for safer shell / HTTP tool execution. |
+
 ### 1. Boot the runtime
 
 ```bash
@@ -116,6 +133,13 @@ Open:
 
 ```text
 http://localhost:3000/runs
+```
+
+Terminal-first:
+
+```bash
+thymos config
+thymos shell
 ```
 
 ### 3. Fire a mock run
