@@ -8,19 +8,22 @@ import {
   getExecution,
   getWorld,
   getWorldAt,
+  subscribeEntries,
   resumeRun,
   subscribeExecution,
   subscribeStream,
   type CognitionEvent,
+  type EntryDto,
   type ExecutionSession,
   type ResourceDto,
   type StreamConnectionState,
 } from "@/lib/thymos-api";
+import { EntryTimeline } from "@/components/trajectory/EntryTimeline";
 import { ExecutionLog } from "@/components/trajectory/ExecutionLog";
 import { StreamView } from "@/components/trajectory/StreamView";
 import { WorldView } from "@/components/trajectory/WorldView";
 
-type ConsoleTab = "execution" | "stream" | "world";
+type ConsoleTab = "execution" | "ledger" | "stream" | "world";
 
 const statusStyles: Record<
   ExecutionSession["status"],
@@ -35,6 +38,7 @@ const statusStyles: Record<
 
 const tabLabels: Record<ConsoleTab, string> = {
   execution: "Execution Log",
+  ledger: "Ledger Spine",
   stream: "Model Stream",
   world: "World State",
 };
@@ -55,6 +59,7 @@ function sessionRevision(session: ExecutionSession) {
 
 export function RunViewer({ id }: { id: string }) {
   const [session, setSession] = useState<ExecutionSession | null>(null);
+  const [entries, setEntries] = useState<EntryDto[]>([]);
   const [streamEvents, setStreamEvents] = useState<CognitionEvent[]>([]);
   const [resources, setResources] = useState<ResourceDto[]>([]);
   const [tab, setTab] = useState<ConsoleTab>("execution");
@@ -63,8 +68,10 @@ export function RunViewer({ id }: { id: string }) {
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [executionLink, setExecutionLink] = useState<StreamConnectionState>("connecting");
+  const [entryLink, setEntryLink] = useState<StreamConnectionState>("connecting");
   const [streamLink, setStreamLink] = useState<StreamConnectionState>("connecting");
   const [lastSnapshotAt, setLastSnapshotAt] = useState<number | null>(null);
+  const [lastEntryAt, setLastEntryAt] = useState<number | null>(null);
   const sessionRevisionRef = useRef<string | null>(null);
 
   const status = session?.status ?? "running";
@@ -126,6 +133,30 @@ export function RunViewer({ id }: { id: string }) {
     );
     return () => es.close();
   }, [id, isTerminal, acceptSnapshot]);
+
+  useEffect(() => {
+    if (isTerminal) {
+      setEntryLink("live");
+      return;
+    }
+
+    const es = subscribeEntries(
+      id,
+      (entry) => {
+        setEntries((prev) => {
+          const key = `${entry.seq}-${entry.id}`;
+          if (prev.some((item) => `${item.seq}-${item.id}` === key)) return prev;
+          return [...prev, entry].slice(-300);
+        });
+        setLastEntryAt(Date.now());
+      },
+      {
+        onOpen: () => setEntryLink("live"),
+        onError: () => setEntryLink("reconnecting"),
+      },
+    );
+    return () => es.close();
+  }, [id, isTerminal]);
 
   useEffect(() => {
     if (isTerminal) {
@@ -262,6 +293,13 @@ export function RunViewer({ id }: { id: string }) {
       : executionLink === "reconnecting"
         ? "Reconnecting"
         : "Connecting";
+  const entryLabel = isTerminal
+    ? "Ledger closed"
+    : entryLink === "live"
+      ? "Ledger live"
+      : entryLink === "reconnecting"
+        ? "Ledger reconnecting"
+        : "Ledger connecting";
   const streamLabel = isTerminal
     ? "Stream closed"
     : streamLink === "live"
@@ -269,6 +307,7 @@ export function RunViewer({ id }: { id: string }) {
       : streamLink === "reconnecting"
         ? "Stream reconnecting"
         : "Stream connecting";
+  const runtimeLagMs = session ? Math.max(0, Date.now() - session.updated_at_ms) : null;
 
   return (
     <main className="thymos-runtime-shell">
@@ -320,6 +359,27 @@ export function RunViewer({ id }: { id: string }) {
           <MetricCard label="Active Tool" value={session?.active_tool ?? "standby"} />
         </div>
 
+        <div className="thymos-realtime-grid">
+          <RealtimeCard
+            label="Snapshot Feed"
+            value={liveLabel}
+            detail={`last ${lastSnapshotAt ? new Date(lastSnapshotAt).toLocaleTimeString() : "pending"} · lag ${formatLag(runtimeLagMs)}`}
+            state={isTerminal ? "closed" : executionLink}
+          />
+          <RealtimeCard
+            label="Ledger Feed"
+            value={entryLabel}
+            detail={`${entries.length} entries · last ${lastEntryAt ? new Date(lastEntryAt).toLocaleTimeString() : "pending"}`}
+            state={isTerminal ? "closed" : entryLink}
+          />
+          <RealtimeCard
+            label="Cognition Feed"
+            value={streamLabel}
+            detail={`${streamEvents.length} events · ${session?.active_tool ?? "no active tool"}`}
+            state={isTerminal ? "closed" : streamLink}
+          />
+        </div>
+
         <div className="thymos-operator-actions">
           {session?.status === "waiting_approval" && pendingApproval ? (
             <div className="thymos-approval-card">
@@ -369,7 +429,7 @@ export function RunViewer({ id }: { id: string }) {
       <section className="thymos-console-layout">
         <div className="thymos-console-main">
           <div className="thymos-tab-row">
-            {(["execution", "stream", "world"] as ConsoleTab[]).map((item) => (
+            {(["execution", "ledger", "stream", "world"] as ConsoleTab[]).map((item) => (
               <button
                 key={item}
                 className={tab === item ? "thymos-tab is-active" : "thymos-tab"}
@@ -381,6 +441,7 @@ export function RunViewer({ id }: { id: string }) {
           </div>
 
           {tab === "execution" && <ExecutionLog session={session} />}
+          {tab === "ledger" && <EntryTimeline entries={entries} />}
           {tab === "stream" && <StreamView events={streamEvents} />}
           {tab === "world" && <WorldView resources={resources} />}
         </div>
@@ -397,7 +458,7 @@ export function RunViewer({ id }: { id: string }) {
 
           <SidePanel
             title="Live Stream"
-            body={`Status: ${streamLabel}\nEvents received: ${streamEvents.length}\nActive tool: ${
+            body={`Execution: ${liveLabel}\nLedger: ${entryLabel}\nModel: ${streamLabel}\nEvents received: ${streamEvents.length}\nLedger entries: ${entries.length}\nActive tool: ${
               session?.active_tool ?? "standby"
             }`}
             accent={streamLink === "live" && !isTerminal ? "#34d399" : "#fbbf24"}
@@ -468,6 +529,35 @@ function MetricCard({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function RealtimeCard({
+  label,
+  value,
+  detail,
+  state,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  state: "connecting" | "live" | "reconnecting" | "closed";
+}) {
+  return (
+    <div className="thymos-realtime-card" data-state={state}>
+      <span className="thymos-live-dot" />
+      <div>
+        <span>{label}</span>
+        <strong>{value}</strong>
+        <p>{detail}</p>
+      </div>
+    </div>
+  );
+}
+
+function formatLag(value: number | null) {
+  if (value === null) return "pending";
+  if (value < 1000) return `${value}ms`;
+  return `${(value / 1000).toFixed(1)}s`;
 }
 
 function SidePanel({ title, body, accent = "#77a9ff" }: { title: string; body: string; accent?: string }) {

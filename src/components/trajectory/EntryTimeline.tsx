@@ -15,15 +15,9 @@ function KindBadge({ kind }: { kind: string }) {
   const bg = kindColors[kind] ?? "#71717a";
   return (
     <span
+      className="thymos-ledger-kind"
       style={{
         background: bg,
-        color: "#fff",
-        padding: "2px 8px",
-        borderRadius: 4,
-        fontSize: 12,
-        fontWeight: 600,
-        textTransform: "uppercase",
-        letterSpacing: "0.05em",
       }}
     >
       {kind}
@@ -34,37 +28,28 @@ function KindBadge({ kind }: { kind: string }) {
 export function EntryTimeline({ entries }: { entries: EntryDto[] }) {
   if (entries.length === 0) {
     return (
-      <p style={{ color: "#a1a1aa", fontStyle: "italic" }}>
-        Waiting for events...
-      </p>
+      <div className="thymos-empty-state">
+        <strong>Ledger Stream Waiting</strong>
+        <p>Waiting for trajectory entries from the runtime ledger...</p>
+      </div>
     );
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+    <div className="thymos-ledger-list">
       {entries.map((e) => (
         <div
           key={`${e.seq}-${e.id}`}
-          style={{
-            display: "flex",
-            gap: 12,
-            alignItems: "flex-start",
-            padding: "8px 12px",
-            background: "#18181b",
-            borderRadius: 6,
-            border: "1px solid #27272a",
-            fontFamily: "var(--font-body), monospace",
-            fontSize: 13,
-          }}
+          className="thymos-ledger-entry"
         >
-          <span style={{ color: "#71717a", minWidth: 30, textAlign: "right" }}>
+          <span className="thymos-ledger-seq">
             #{e.seq}
           </span>
           <KindBadge kind={e.kind} />
-          <code style={{ color: "#a1a1aa", fontSize: 11 }}>
+          <code className="thymos-ledger-id">
             {e.id.slice(0, 8)}
           </code>
-          <span style={{ color: "#d4d4d8", flex: 1 }}>
+          <span className="thymos-ledger-detail">
             {formatDetail(e)}
           </span>
         </div>

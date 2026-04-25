@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { RunViewer } from "@/components/trajectory/RunViewer";
 import {
@@ -87,6 +87,10 @@ export default function RunsPage() {
   const [recentRuns, setRecentRuns] = useState<RunListResponse["runs"]>([]);
   const [opsError, setOpsError] = useState<string | null>(null);
   const selectedProvider = providerOptions.find((option) => option.value === provider) ?? providerOptions[0];
+  const taskPreview = useMemo(
+    () => buildTaskPreview(task, provider, model, maxSteps),
+    [task, provider, model, maxSteps],
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -223,6 +227,50 @@ export default function RunsPage() {
             />
           </label>
 
+          <div className="thymos-preview-card" aria-live="polite">
+            <div className="thymos-preview-head">
+              <div>
+                <span className="thymos-eyebrow">Live Execution Preview</span>
+                <strong>{taskPreview.title}</strong>
+              </div>
+              <span className="thymos-preview-risk" data-risk={taskPreview.risk}>
+                {taskPreview.risk}
+              </span>
+            </div>
+
+            <p>{taskPreview.summary}</p>
+
+            <div className="thymos-preview-route">
+              {taskPreview.phases.map((phase, index) => (
+                <span key={phase}>
+                  <b>{String(index + 1).padStart(2, "0")}</b>
+                  {phase}
+                </span>
+              ))}
+            </div>
+
+            <div className="thymos-preview-meta">
+              <span>Provider: {selectedProvider.label}</span>
+              <span>Suggested steps: {taskPreview.suggestedSteps}</span>
+              <span>{task.trim().length} chars</span>
+            </div>
+
+            <div className="thymos-console-command thymos-preview-command">
+              <span>$</span>
+              <code>{taskPreview.command}</code>
+            </div>
+
+            {taskPreview.suggestedSteps !== maxSteps ? (
+              <button
+                type="button"
+                className="thymos-preview-tune"
+                onClick={() => setMaxSteps(taskPreview.suggestedSteps)}
+              >
+                Use suggested step budget
+              </button>
+            ) : null}
+          </div>
+
           <div className="thymos-suggestion-row">
             {suggestedTasks.map((suggestion) => (
               <button
@@ -357,4 +405,66 @@ function ControlTile({
       <p>{detail}</p>
     </div>
   );
+}
+
+function buildTaskPreview(
+  task: string,
+  provider: CognitionProvider,
+  model: string,
+  maxSteps: number,
+) {
+  const normalized = task.trim().toLowerCase();
+  const hasTask = normalized.length > 0;
+  const isCodeChange = /\b(refactor|fix|implement|add|update|change|edit|patch|build)\b/.test(normalized);
+  const isVerification = /\b(test|verify|check|lint|typecheck|audit)\b/.test(normalized);
+  const isExploration = /\b(inspect|map|explain|summarize|analyze|review)\b/.test(normalized);
+  const isRisky = /\b(delete|remove|deploy|release|push|production|secret|token|billing|payment)\b/.test(normalized);
+
+  const suggestedSteps = isRisky
+    ? 36
+    : isCodeChange && isVerification
+      ? 30
+      : isCodeChange
+        ? 24
+        : isExploration
+          ? 14
+          : 16;
+
+  const title = !hasTask
+    ? "Type a task to preview the runtime path"
+    : isRisky
+      ? "Guarded execution with approval posture"
+      : isCodeChange
+        ? "Code execution route"
+        : isVerification
+          ? "Verification route"
+          : isExploration
+            ? "Inspection route"
+            : "General runtime route";
+
+  const risk = !hasTask ? "idle" : isRisky ? "high" : isCodeChange ? "medium" : "low";
+  const phases = [
+    "Intent",
+    isRisky ? "Policy + approval" : "Policy check",
+    isVerification ? "Test run" : isCodeChange ? "Patch proposal" : "Tool plan",
+    "Ledger result",
+  ];
+  const providerArg = provider === "mock" ? "--provider mock" : `--provider ${provider}`;
+  const modelArg = model.trim() ? ` --model ${shellQuote(model.trim())}` : "";
+  const prompt = hasTask ? task.trim() : "Describe the task you want Thymos to run";
+
+  return {
+    title,
+    risk,
+    suggestedSteps,
+    phases,
+    summary: hasTask
+      ? "Thymos will turn this into typed intents, check policy and budget, execute through allowed tools, then stream the result into the ledger."
+      : "The preview updates live as you type so operators can see the likely path before launching a run.",
+    command: `thymos run ${providerArg}${modelArg} --max-steps ${Math.max(1, Math.trunc(maxSteps || suggestedSteps))} ${shellQuote(prompt)}`,
+  };
+}
+
+function shellQuote(value: string) {
+  return `"${value.replace(/(["\\$`])/g, "\\$1")}"`;
 }
