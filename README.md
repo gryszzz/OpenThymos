@@ -205,6 +205,9 @@ tool, counters, final answer, execution log, and replayable world state.
 ## Verify The Stack
 
 ```bash
+# Local tooling, docs hygiene, and GitHub Pages configuration
+npm run doctor
+
 # Web app, static export, and docs
 npm run verify
 

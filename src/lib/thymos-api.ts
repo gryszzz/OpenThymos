@@ -35,10 +35,12 @@ export interface StreamCallbacks {
 }
 
 export interface RunRecord {
+  run_id?: string;
   trajectory_id: string;
   task: string;
   status: "running" | "completed" | "failed";
   summary?: RunSummary;
+  tenant_id?: string;
 }
 
 export interface RunSummary {
@@ -144,6 +146,52 @@ export interface CognitionConfig {
   base_url?: string;
 }
 
+export interface RuntimeHealth {
+  status: "ok" | string;
+  mode: "reference" | "production" | string;
+  shutdown: boolean;
+}
+
+export interface RuntimeReady {
+  status: "ready" | "not_ready" | string;
+  mode: "reference" | "production" | string;
+  shutdown: boolean;
+  checks?: Record<string, boolean>;
+}
+
+export interface RunListResponse {
+  runs: Array<RunRecord & { run_id: string }>;
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ActionResponse {
+  run_id: string;
+  status?: string;
+}
+
+/** GET /health — liveness probe for the runtime server. */
+export async function getHealth() {
+  const res = await fetch(`${BASE}/health`);
+  return readJson<RuntimeHealth>(res, "get health");
+}
+
+/** GET /ready — readiness probe with operational checks. */
+export async function getReady() {
+  const res = await fetch(`${BASE}/ready`);
+  return readJson<RuntimeReady>(res, "get readiness");
+}
+
+/** GET /runs — list recent runs. */
+export async function listRuns(limit = 8) {
+  const safeLimit = Number.isFinite(limit)
+    ? Math.min(50, Math.max(1, Math.trunc(limit)))
+    : 8;
+  const res = await fetch(`${BASE}/runs?limit=${safeLimit}`);
+  return readJson<RunListResponse>(res, "list runs");
+}
+
 /** POST /runs — start a new agent run. */
 export async function createRun(
   task: string,
@@ -163,6 +211,53 @@ export async function createRun(
     }),
   });
   return readJson<{ run_id: string; task: string; status: string }>(res, "create run");
+}
+
+/** POST /runs/:id/cancel — cancel a running agent run. */
+export async function cancelRun(id: string) {
+  const res = await fetch(`${BASE}/runs/${id}/cancel`, { method: "POST" });
+  return readJson<ActionResponse>(res, "cancel run");
+}
+
+/** POST /runs/:id/resume — resume a failed or interrupted run. */
+export async function resumeRun(
+  id: string,
+  task: string,
+  maxSteps = 16,
+  cognition?: CognitionConfig,
+) {
+  const safeMaxSteps = Number.isFinite(maxSteps)
+    ? Math.min(100, Math.max(1, Math.trunc(maxSteps)))
+    : 16;
+  const res = await fetch(`${BASE}/runs/${id}/resume`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      task,
+      max_steps: safeMaxSteps,
+      ...(cognition ? { cognition } : {}),
+    }),
+  });
+  return readJson<ActionResponse>(res, "resume run");
+}
+
+/** POST /runs/:id/approvals/:channel — approve or deny a pending proposal. */
+export async function decideApproval(
+  id: string,
+  channel: string,
+  approve: boolean,
+  proposalId?: string,
+) {
+  const res = await fetch(`${BASE}/runs/${id}/approvals/${encodeURIComponent(channel)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ approve, proposal_id: proposalId }),
+  });
+  return readJson<{
+    run_id: string;
+    channel: string;
+    approved: boolean;
+  }>(res, approve ? "approve proposal" : "deny proposal");
 }
 
 /** GET /runs/:id — get run status. */

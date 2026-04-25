@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "pages:preview": "npm run build && python3 -m http.server 4173 -d out",
+    "doctor": "node scripts/doctor.mjs",
     "docs:check": "node scripts/check-docs.mjs",
     "site:check": "npm run build && npm run docs:check",
     "verify": "npm run typecheck && npm run build && npm run docs:check",

@@ -3,9 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   branchFrom,
+  cancelRun,
+  decideApproval,
   getExecution,
   getWorld,
   getWorldAt,
+  resumeRun,
   subscribeExecution,
   subscribeStream,
   type CognitionEvent,
@@ -57,6 +60,8 @@ export function RunViewer({ id }: { id: string }) {
   const [tab, setTab] = useState<ConsoleTab>("execution");
   const [scrubSeq, setScrubSeq] = useState<number | null>(null);
   const [branchMsg, setBranchMsg] = useState<string | null>(null);
+  const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [executionLink, setExecutionLink] = useState<StreamConnectionState>("connecting");
   const [streamLink, setStreamLink] = useState<StreamConnectionState>("connecting");
   const [lastSnapshotAt, setLastSnapshotAt] = useState<number | null>(null);
@@ -168,6 +173,20 @@ export function RunViewer({ id }: { id: string }) {
     [commitLogs],
   );
   const currentScrubSeq = scrubSeq ?? maxSeq;
+  const pendingApproval = useMemo(() => {
+    const log = session?.log
+      .slice()
+      .reverse()
+      .find((entry) => entry.title.startsWith("Approval requested"));
+    if (!log) return null;
+    const channel = log.detail.match(/^Channel\s+([^:]+):/)?.[1]?.trim() ?? "default";
+    return {
+      channel,
+      proposalId: log.proposal_id,
+      tool: log.tool ?? session?.active_tool ?? "tool",
+      detail: log.detail,
+    };
+  }, [session]);
 
   const handleBranch = useCallback(
     async (commitId: string) => {
@@ -179,6 +198,60 @@ export function RunViewer({ id }: { id: string }) {
       }
     },
     [id],
+  );
+
+  const handleCancel = useCallback(async () => {
+    setActionBusy("cancel");
+    setActionMsg(null);
+    try {
+      await cancelRun(id);
+      setActionMsg("Cancellation signal sent to the runtime.");
+      const snapshot = await getExecution(id);
+      acceptSnapshot(snapshot);
+    } catch (error) {
+      setActionMsg(`Cancel failed: ${(error as Error).message}`);
+    } finally {
+      setActionBusy(null);
+    }
+  }, [id, acceptSnapshot]);
+
+  const handleResume = useCallback(async () => {
+    setActionBusy("resume");
+    setActionMsg(null);
+    try {
+      await resumeRun(id, session?.task ?? "resume run", session?.max_steps ?? 16);
+      setActionMsg("Resume requested. Reattaching to execution state.");
+      const snapshot = await getExecution(id);
+      acceptSnapshot(snapshot);
+    } catch (error) {
+      setActionMsg(`Resume failed: ${(error as Error).message}`);
+    } finally {
+      setActionBusy(null);
+    }
+  }, [id, session, acceptSnapshot]);
+
+  const handleApproval = useCallback(
+    async (approve: boolean) => {
+      if (!pendingApproval) return;
+      setActionBusy(approve ? "approve" : "deny");
+      setActionMsg(null);
+      try {
+        await decideApproval(
+          id,
+          pendingApproval.channel,
+          approve,
+          pendingApproval.proposalId,
+        );
+        setActionMsg(approve ? "Approval sent. Runtime can continue." : "Denial sent. Runtime will adjust.");
+        const snapshot = await getExecution(id);
+        acceptSnapshot(snapshot);
+      } catch (error) {
+        setActionMsg(`Approval action failed: ${(error as Error).message}`);
+      } finally {
+        setActionBusy(null);
+      }
+    },
+    [id, pendingApproval, acceptSnapshot],
   );
 
   const palette = statusStyles[status];
@@ -245,6 +318,51 @@ export function RunViewer({ id }: { id: string }) {
           <MetricCard label="Recoveries" value={String((session?.counters.recoveries ?? 0) + (session?.counters.retries ?? 0))} />
           <MetricCard label="Approvals" value={String(session?.counters.approvals_pending ?? 0)} />
           <MetricCard label="Active Tool" value={session?.active_tool ?? "standby"} />
+        </div>
+
+        <div className="thymos-operator-actions">
+          {session?.status === "waiting_approval" && pendingApproval ? (
+            <div className="thymos-approval-card">
+              <div>
+                <span className="thymos-eyebrow">Approval Required</span>
+                <strong>{pendingApproval.tool}</strong>
+                <p>{pendingApproval.detail}</p>
+              </div>
+              <div className="thymos-chip-row">
+                <PanelButton
+                  onClick={() => void handleApproval(true)}
+                  disabled={actionBusy !== null}
+                >
+                  {actionBusy === "approve" ? "Approving" : "Approve"}
+                </PanelButton>
+                <PanelButton
+                  onClick={() => void handleApproval(false)}
+                  disabled={actionBusy !== null}
+                  tone="danger"
+                >
+                  {actionBusy === "deny" ? "Denying" : "Deny"}
+                </PanelButton>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="thymos-chip-row">
+            <PanelButton
+              onClick={() => void handleCancel()}
+              disabled={!session || isTerminal || actionBusy !== null}
+              tone="danger"
+            >
+              {actionBusy === "cancel" ? "Cancelling" : "Cancel Run"}
+            </PanelButton>
+            <PanelButton
+              onClick={() => void handleResume()}
+              disabled={!session || session.status === "completed" || actionBusy !== null}
+            >
+              {actionBusy === "resume" ? "Resuming" : "Resume"}
+            </PanelButton>
+          </div>
+
+          {actionMsg ? <p className="thymos-action-message">{actionMsg}</p> : null}
         </div>
       </section>
 
@@ -363,9 +481,24 @@ function SidePanel({ title, body, accent = "#77a9ff" }: { title: string; body: s
   );
 }
 
-function PanelButton({ onClick, children }: { onClick: () => void; children: ReactNode }) {
+function PanelButton({
+  onClick,
+  children,
+  disabled = false,
+  tone = "default",
+}: {
+  onClick: () => void;
+  children: ReactNode;
+  disabled?: boolean;
+  tone?: "default" | "danger";
+}) {
   return (
-    <button onClick={onClick} className="thymos-button-secondary">
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="thymos-button-secondary"
+      data-tone={tone}
+    >
       {children}
     </button>
   );

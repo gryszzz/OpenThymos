@@ -3,7 +3,16 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { RunViewer } from "@/components/trajectory/RunViewer";
-import { createRun, type CognitionProvider } from "@/lib/thymos-api";
+import {
+  createRun,
+  getHealth,
+  getReady,
+  listRuns,
+  type CognitionProvider,
+  type RunListResponse,
+  type RuntimeHealth,
+  type RuntimeReady,
+} from "@/lib/thymos-api";
 
 const suggestedTasks = [
   {
@@ -73,11 +82,47 @@ export default function RunsPage() {
   const [model, setModel] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [health, setHealth] = useState<RuntimeHealth | null>(null);
+  const [ready, setReady] = useState<RuntimeReady | null>(null);
+  const [recentRuns, setRecentRuns] = useState<RunListResponse["runs"]>([]);
+  const [opsError, setOpsError] = useState<string | null>(null);
   const selectedProvider = providerOptions.find((option) => option.value === provider) ?? providerOptions[0];
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     setRunId(new URLSearchParams(window.location.search).get("id"));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshControlPlane() {
+      try {
+        const [healthSnapshot, readySnapshot, runsSnapshot] = await Promise.all([
+          getHealth(),
+          getReady(),
+          listRuns(6),
+        ]);
+
+        if (!cancelled) {
+          setHealth(healthSnapshot);
+          setReady(readySnapshot);
+          setRecentRuns(runsSnapshot.runs);
+          setOpsError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setOpsError(err instanceof Error ? err.message : String(err));
+        }
+      }
+    }
+
+    void refreshControlPlane();
+    const timer = setInterval(refreshControlPlane, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, []);
 
   async function handleSubmit(event: FormEvent) {
@@ -141,6 +186,27 @@ export default function RunsPage() {
               <span>$</span>
               <code>thymos run --follow "Inspect the runtime, verify the result, and report back"</code>
             </div>
+          </div>
+
+          <div className="thymos-control-grid" aria-label="Runtime control plane status">
+            <ControlTile
+              label="Runtime"
+              value={health?.status ?? "offline"}
+              detail={health ? `${health.mode} mode` : opsError ?? "Waiting for backend"}
+              tone={health?.status === "ok" ? "good" : "warn"}
+            />
+            <ControlTile
+              label="Readiness"
+              value={ready?.status ?? "unknown"}
+              detail={ready?.checks ? formatChecks(ready.checks) : "Health probes + stores"}
+              tone={ready?.status === "ready" ? "good" : "warn"}
+            />
+            <ControlTile
+              label="Recent Runs"
+              value={String(recentRuns.length)}
+              detail="Live cache from /runs"
+              tone={recentRuns.length > 0 ? "signal" : "neutral"}
+            />
           </div>
         </div>
 
@@ -224,6 +290,71 @@ export default function RunsPage() {
           {error ? <p className="thymos-error">{error}</p> : null}
         </form>
       </section>
+
+      <section className="thymos-console-panel thymos-run-history-panel">
+        <div className="thymos-history-head">
+          <div>
+            <span className="thymos-eyebrow">Run Memory</span>
+            <h2>Recent execution sessions</h2>
+          </div>
+          <p>Jump back into live or completed runtime state without hunting through terminal logs.</p>
+        </div>
+
+        {opsError ? (
+          <div className="thymos-empty-state">
+            <strong>Runtime Offline</strong>
+            <p>{opsError}</p>
+          </div>
+        ) : recentRuns.length > 0 ? (
+          <div className="thymos-run-history-list">
+            {recentRuns.map((run) => (
+              <button
+                type="button"
+                className="thymos-run-history-item"
+                key={run.run_id}
+                onClick={() => router.push(`/runs?id=${encodeURIComponent(run.run_id)}`)}
+              >
+                <span className="thymos-run-status" data-status={run.status}>
+                  {run.status}
+                </span>
+                <strong>{run.task}</strong>
+                <code>{run.run_id.slice(0, 12)}</code>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="thymos-empty-state">
+            <strong>No Runs Yet</strong>
+            <p>Start a mock run and this panel becomes your local runtime history.</p>
+          </div>
+        )}
+      </section>
     </main>
+  );
+}
+
+function formatChecks(checks: Record<string, boolean>) {
+  return Object.entries(checks)
+    .map(([name, ok]) => `${name.replace(/_/g, " ")}: ${ok ? "ok" : "wait"}`)
+    .join(" · ");
+}
+
+function ControlTile({
+  label,
+  value,
+  detail,
+  tone,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  tone: "good" | "warn" | "signal" | "neutral";
+}) {
+  return (
+    <div className="thymos-control-tile" data-tone={tone}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <p>{detail}</p>
+    </div>
   );
 }
